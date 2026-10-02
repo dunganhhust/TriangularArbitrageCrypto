@@ -79,16 +79,30 @@ exceeds the budget, but only after it has seen `points.minSampleUsd` of volume.
 
 ## Fee rebate is the main goal
 
-The bot only rests limit orders on both sides, so it is already a maker; the fee *level* is what matters.
-At tier 0 a maker pays 1.5 bps, so rebates must come from one of: the **market-maker fee tier** (judged on the
-share of your volume that is maker), a **volume tier**, a **referral discount**, or a **`maker_incentive` /
-`fee_rebate` campaign**. `npm run check` prints all of them (`fees.marketMakerTiers`, `fees.volumeTiers`,
-`campaigns.active`, `campaigns.mine`) so you can see what is actually on offer and how far you are from it.
+**The Maker Rebate campaign** (docs page "Maker Rebate", app: Rewards): accounts with a maker ratio of at least
+**80 %** over a half-month cycle (1st-15th, 16th-end) receive **0.5 bps** on their **bulk-order** maker fill volume,
+paid on top of the standard fee after the cycle ends. Spot maker volume counts double; perp and spot qualify
+separately; cap 25,000 USD per month. This bot places only bulk orders and is ~100 % maker, so it fits the rule.
 
-What the bot does for it: it judges every fill maker or taker from the fee actually charged (a quote that crossed
-the book is a taker fill and is logged as `taker fill`), tracks `takerFills` in `status`, and logs `makerFraction`
-in `data/points_log.csv`. Emergency reduces are IOC taker orders and count against the maker share, so keep
-positions small enough that they never trigger.
+What that is worth, honestly: at fee tier 0 the maker fee is 1.5 bps, so the rebate brings the cost to **1.0 bps**,
+not below zero. Net maker fee goes negative only at the higher volume tiers (0.4 bps at 25 M USD / 30 d and a
+free maker side from 100 M USD / 30 d). In dollars it is tiny at small size (0.5 bps of 30,000 USD = 0.15 USD).
+The bot therefore treats 1.0 bps as the fixed cost to beat and relies on spread capture for the rest.
+
+What the bot does for it:
+
+- tracks the **cycle maker ratio** (`status.cycleMakerRatio`, `rebateEligible`, `projectedRebateUsd`; also in
+  `data/points_log.csv`) and persists it across restarts;
+- **holds back taker reduces** while the ratio is within `rebate.ratioBuffer` of the 80 % line (the one-sided
+  quotes keep working the position down as a maker) unless the position is far past the emergency line;
+- judges every fill maker or taker from the fee actually charged, so an order that crossed the book is logged
+  as `taker fill`;
+- subtracts the expected rebate from the maker fee when deciding whether sitting at the touch is affordable;
+- records earned/ready rebate amounts from the campaign summary (`rebateEarnedUsd`, `rebateReadyUsd`) and logs
+  when something is ready to claim. **Claiming is manual** (Rewards in the app).
+
+Other fee levers: volume tiers, referral discount, and `npm run check` prints the fee ladder, active campaigns
+and your campaign history (`fees`, `campaigns`).
 
 ## Protection against fast markets, front-running and bigger bots
 

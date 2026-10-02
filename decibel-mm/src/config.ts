@@ -117,6 +117,20 @@ export const configSchema = z.object({
     })
     .default({}),
 
+  /**
+   * Decibel's Maker Rebate campaign: 0.5 bps on bulk-order maker fill volume for accounts whose maker
+   * ratio is at least 80 % over a half-month cycle (1st-15th, 16th-end), perp and spot judged separately.
+   */
+  rebate: z
+    .object({
+      enabled: z.boolean().default(true),
+      bps: z.number().nonnegative().default(0.5),
+      minMakerRatio: z.number().min(0).max(1).default(0.8),
+      /** Keep the cycle maker ratio at least this far above the threshold; below it, taker reduces are held back. */
+      ratioBuffer: z.number().min(0).max(0.5).default(0.05),
+    })
+    .default({}),
+
   /** Competing for queue priority with other bots. */
   competition: z
     .object({

@@ -72,6 +72,8 @@ export class MarketMaker {
   private gasDay = "";
   private gasDayBase = 0;
   private gasPausedDay: string | null = null;
+  /** Time of the current step (injected by the caller so simulations can run faster than real time). */
+  private clock = 0;
 
   constructor(
     private readonly cfg: Config,
@@ -121,6 +123,7 @@ export class MarketMaker {
   /** One control iteration. `now` is injected so simulations can run faster than real time. */
   async step(now: number): Promise<void> {
     if (this.halted) return;
+    this.clock = now;
 
     for (const f of this.ex.drainFills()) {
       const st = this.states.get(f.market);
@@ -166,6 +169,15 @@ export class MarketMaker {
     }
 
     await this.housekeeping(now);
+  }
+
+  /** True when a taker reduce should wait: it would cost the rebate and the position is not yet extreme. */
+  private holdTakerReduce(posUsd: number, maxPos: number): boolean {
+    const r = this.cfg.rebate;
+    if (!r.enabled) return false;
+    const ratio = this.points.stats(this.clock).cycleMakerRatio;
+    if (ratio === null || ratio > r.minMakerRatio + r.ratioBuffer) return false;
+    return Math.abs(posUsd) <= maxPos * this.cfg.risk.emergencyPositionMult * 2;
   }
 
   /** Pull quotes for the rest of the UTC day once the gas budget is spent. */
@@ -287,7 +299,7 @@ export class MarketMaker {
     }
     st.lastPause = null;
 
-    if (risk.kind === "reduce" && fair !== null) {
+    if (risk.kind === "reduce" && fair !== null && !this.holdTakerReduce(posUsd, maxPos)) {
       const size = roundDownToStep(Math.min(risk.sizeUsd / fair, Math.abs(position)), st.spec.lotSize);
       if (size >= st.spec.minSize) {
         const slip = 10 / 1e4;
@@ -298,6 +310,7 @@ export class MarketMaker {
       }
       return;
     }
+    // (When holdTakerReduce is true the one-sided quotes below keep working the position down as a maker.)
     if (fair === null) return;
 
     if (!st.warnedTooSmall && st.cfg.levelSizeUsd * scale / fair < st.spec.minSize) {
@@ -344,6 +357,14 @@ export class MarketMaker {
     }
   }
 
+  /** Rebate we can count on: only while the cycle maker ratio is at (or has no reason to fall below) the threshold. */
+  private expectedRebateBps(): number {
+    const r = this.cfg.rebate;
+    if (!r.enabled) return 0;
+    const ratio = this.points.stats(this.clock).cycleMakerRatio;
+    return ratio === null || ratio >= r.minMakerRatio ? r.bps : 0;
+  }
+
   private quoteParams(st: MarketState, mult: number, scale: number): QuoteParams {
     const c = st.cfg;
     const fee = this.ex.getFees?.();
@@ -362,7 +383,7 @@ export class MarketMaker {
       competition: {
         joinTouch: this.cfg.competition.joinTouch,
         improveTicks: this.cfg.competition.improveTicks,
-        makerFeeBps: fee ? fee.maker * 1e4 : this.cfg.competition.makerFeeBps,
+        makerFeeBps: Math.max(0, (fee ? fee.maker * 1e4 : this.cfg.competition.makerFeeBps) - this.expectedRebateBps()),
         maxCostBps: this.cfg.points.costBudgetBps,
       },
     };
@@ -389,6 +410,10 @@ export class MarketMaker {
         rampStage: this.ramp.stage,
         sizeMult: this.ramp.mult,
         takerFills: this.takerFills,
+        cycle: s.cycleKey,
+        cycleMakerRatio: s.cycleMakerRatio === null ? null : round(s.cycleMakerRatio, 3),
+        rebateEligible: s.cycleMakerRatio === null || s.cycleMakerRatio >= this.cfg.rebate.minMakerRatio,
+        projectedRebateUsd: round((s.cycleMakerVolumeUsd * this.cfg.rebate.bps) / 1e4, 4),
         fuseTripsLastHour: fuses,
         positions,
         ...(gasNow ? { txCount: gasNow.txCount, gasApt: round(gasNow.gasApt, 6), signerAptBalance: gasNow.balanceApt === null ? null : round(gasNow.balanceApt, 4) } : {}),
@@ -417,6 +442,8 @@ export class MarketMaker {
         ampsToday: snap.ampsToday,
         totalPoints: snap.totalPoints ?? null,
         makerFraction: snap.makerFraction ?? null,
+        cycleMakerRatio: s.cycleMakerRatio === null ? null : round(s.cycleMakerRatio, 4),
+        cycleMakerVolumeUsd: round(s.cycleMakerVolumeUsd, 2),
         rebateEarnedUsd: snap.rebateEarnedUsd ?? null,
         rebateReadyUsd: snap.rebateReadyUsd ?? null,
         tradingAmpsToday: snap.tradingAmpsToday,
@@ -449,7 +476,15 @@ export class MarketMaker {
       mkdirSync(dirname(file), { recursive: true });
       writeFileSync(
         file,
-        JSON.stringify({ dayKey: s.dayKey, dayVolumeUsd: s.dayVolumeUsd, spreadMult: s.spreadMult, rampStage: this.ramp.stage }),
+        JSON.stringify({
+          dayKey: s.dayKey,
+          dayVolumeUsd: s.dayVolumeUsd,
+          spreadMult: s.spreadMult,
+          rampStage: this.ramp.stage,
+          cycleKey: s.cycleKey,
+          cycleMakerUsd: s.cycleMakerVolumeUsd,
+          cycleTakerUsd: s.cycleTakerVolumeUsd,
+        }),
       );
     } catch (e) {
       this.log("warn", "state save failed", { error: String(e) });
@@ -462,6 +497,7 @@ export class MarketMaker {
       if (raw.dayKey === new Date().toISOString().slice(0, 10)) this.points.restore(raw);
       // The ramp stage is earned over days, so it survives day changes.
       if (typeof raw.rampStage === "number") this.ramp.restoreStage(raw.rampStage);
+      if (typeof raw.cycleKey === "string") this.points.restoreCycle({ cycleKey: raw.cycleKey, makerUsd: Number(raw.cycleMakerUsd) || 0, takerUsd: Number(raw.cycleTakerUsd) || 0 }, Date.now());
     } catch {
       /* no prior state */
     }

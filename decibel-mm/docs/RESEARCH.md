@@ -38,6 +38,13 @@ numbers, 1.1/3.4 bps at tier 0; it was out of date. Trust the live `userFees` va
 `npm run check` also confirmed mainnet market names use a slash (`BTC/USD`), and `perp_equity_balance`
 is reported in plain USD.
 
+**Maker Rebate campaign (docs "Maker Rebate", read 2026-10-02):** 0.5 bps on bulk-order maker fill volume for
+accounts with an 80 %+ maker ratio over the cycle, measured per leg (perp / spot) on bulk-order fill volume;
+`maker_notional = perp_maker + 2 * spot_maker`; cycles 1st-15th and 16th-end; cap 25,000 USD per month shared by
+both cycles; "a direct rebate paid on top of standard fees". Paid after the cycle ends as a claimable campaign
+(the app lists past periods as "Not eligible" for an account that did not trade in them). The page's remaining
+eligibility bullets were not captured.
+
 **Where a maker rebate can come from (from the SDK types, unverified until `npm run check` prints the live numbers):**
 
 - `fee_schedule.tiers.market_maker[]`: tiers judged on `maker_fraction_threshold`, the share of your fee-window

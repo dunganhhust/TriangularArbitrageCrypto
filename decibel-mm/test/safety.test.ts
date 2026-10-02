@@ -114,3 +114,36 @@ describe("gas and staleness controls", () => {
     expect(h.logs.some((l) => l.msg === "FUSE tripped: pulling quotes")).toBe(false); // 10 bps is below the fuse
   });
 });
+
+describe("maker-rebate eligibility", () => {
+  async function takerReduces(lowRatio: boolean): Promise<number> {
+    const h = await setup({
+      markets: [{ name: "BTC/USD", maxPositionUsd: 100, levelSizeUsd: 20 }],
+      paper: { seed: 4, flowPerSec: 0.01, annualVolPct: 1 },
+    });
+    let reduces = 0;
+    const orig = h.ex.reduce.bind(h.ex);
+    h.ex.reduce = async (req) => {
+      reduces++;
+      return orig(req);
+    };
+    await h.run(0, 3);
+    const sim = (h.ex as unknown as { sims: Map<string, { position: number }> }).sims.get("BTC/USD")!;
+    sim.position = 200 / 60_000; // 200 USD long: past the 150 USD emergency line, short of the 300 USD extreme
+    if (lowRatio) {
+      const now = T0 + 3_000;
+      h.mm.points.onFill({ id: "m", market: "BTC/USD", side: "buy", price: 60_000, size: 0.001, feeUsd: 0, isMaker: true, ts: now }, 60_000);
+      h.mm.points.onFill({ id: "t", market: "BTC/USD", side: "sell", price: 60_000, size: 0.001, feeUsd: 0, isMaker: false, ts: now }, 60_000); // 50 % maker
+    }
+    await h.run(3, 4);
+    return reduces;
+  }
+
+  it("uses a taker reduce when the maker ratio has room", async () => {
+    expect(await takerReduces(false)).toBeGreaterThan(0);
+  });
+
+  it("holds the taker reduce while the cycle maker ratio is under the threshold", async () => {
+    expect(await takerReduces(true)).toBe(0);
+  });
+});

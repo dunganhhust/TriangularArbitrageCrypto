@@ -52,5 +52,11 @@
   },
   "execution": {
     "encrypted": "auto"
+  },
+  "rebate": {
+    "enabled": true,
+    "bps": 0.5,
+    "minMakerRatio": 0.8,
+    "ratioBuffer": 0.05
   }
 }

@@ -90,4 +90,29 @@ describe("PointsController", () => {
     c.resetToxicity();
     expect(c.toxicity(3)).toBeNull();
   });
+
+  it("tracks the half-month rebate cycle: maker ratio, and a reset on the 16th", () => {
+    const c = new PointsController(cfg);
+    const d15 = Date.UTC(2026, 9, 15, 23, 0, 0);
+    c.onFill(fill(1, "buy", 100, d15, 8), 100); // 800 maker
+    c.onFill({ ...fill(2, "sell", 100, d15, 2), isMaker: false }, 100); // 200 taker
+    const a = c.stats(d15);
+    expect(a.cycleKey).toBe("2026-10-A");
+    expect(a.cycleMakerVolumeUsd).toBe(800);
+    expect(a.cycleMakerRatio).toBeCloseTo(0.8, 6);
+    const b = c.stats(Date.UTC(2026, 9, 16, 0, 0, 1));
+    expect(b.cycleKey).toBe("2026-10-B");
+    expect(b.cycleMakerRatio).toBeNull();
+    expect(b.cycleMakerVolumeUsd).toBe(0);
+  });
+
+  it("restores the cycle only if it is still the same cycle", () => {
+    const c = new PointsController(cfg);
+    const now = Date.UTC(2026, 9, 5);
+    c.restoreCycle({ cycleKey: "2026-10-A", makerUsd: 900, takerUsd: 100 }, now);
+    expect(c.stats(now).cycleMakerRatio).toBeCloseTo(0.9, 6);
+    const d = new PointsController(cfg);
+    d.restoreCycle({ cycleKey: "2026-09-B", makerUsd: 900, takerUsd: 100 }, now);
+    expect(d.stats(now).cycleMakerRatio).toBeNull();
+  });
 });
