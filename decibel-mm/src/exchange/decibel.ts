@@ -417,8 +417,10 @@ export class DecibelExchange implements Exchange {
     }
     try {
       const tx = await this.write.placeBulk({ marketAddr: spec.addr, sequenceNumber, ...chain });
-      const ok = (tx as { success?: boolean }).success !== false;
-      if (!ok) this.log("bulk order tx failed", { market, vm: (tx as { vm_status?: string }).vm_status });
+      const r = tx as { success?: boolean; vm_status?: string; hash?: string; gas_used?: string };
+      const ok = r.success !== false;
+      if (!ok) this.log("bulk order tx failed", { market, vm: r.vm_status });
+      else this.log("ladder placed", { market, sequenceNumber, hash: r.hash, gasUsed: r.gas_used, bids: ladder.bids.length, asks: ladder.asks.length });
       return ok;
     } catch (e) {
       this.log("bulk order tx error", { market, error: String(e) });
@@ -532,6 +534,25 @@ export class DecibelExchange implements Exchange {
       }),
       markets: markets.map((m) => ({ name: m.market_name, tick: m.tick_size, lot: m.lot_size, min: m.min_size, maxLev: m.max_leverage, mode: m.mode })),
       equity: this.account?.equityUsd,
+      // Resting bulk-order ladders as the indexer sees them (human units). The web app's Open Orders
+      // tab may not list bulk orders, so this is the reliable way to confirm quotes are live.
+      bulkOrders: await this.read.userBulkOrders
+        .getByAddr({ subAddr: this.o.env.subaccount })
+        .then((rows) =>
+          rows.map((r) => {
+            const name = this.byAddr.get(r.market.toLowerCase()) ?? r.market;
+            const ps = this.specs.has(name) ? this.pxScale(name) : 1;
+            const ss = this.specs.has(name) ? this.szScale(name) : 1;
+            return {
+              market: name,
+              sequenceNumber: r.sequence_number,
+              bids: r.bid_prices.map((p, i) => ({ price: p / ps, size: (r.bid_sizes[i] ?? 0) / ss })),
+              asks: r.ask_prices.map((p, i) => ({ price: p / ps, size: (r.ask_sizes[i] ?? 0) / ss })),
+              cancellationReason: r.cancellation_reason ?? null,
+            };
+          }),
+        )
+        .catch((e: unknown) => ({ error: String(e).slice(0, 200) })),
       signer: { address: this.write.account.accountAddress.toString(), aptBalance: this.balanceApt, paysGas: true },
       points: await this.getPoints(),
     };
