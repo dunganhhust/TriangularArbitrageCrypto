@@ -153,9 +153,10 @@ function render(d) {
   // Positions
   const pos = L.positions || {}, posUsd = L.positionsUsd || {}, mids = L.mids || {}, quoting = L.quoting || {}, paused = L.paused || {};
   const rows = Object.keys(pos).map((m) => {
-    const mp = cfgOf(m).maxPositionUsd, pct = isNum(mp) && isNum(posUsd[m]) ? Math.abs(posUsd[m]) / mp : null;
+    // The cap in force is the configured one scaled by the current ramp stage.
+    const mp = cfgOf(m).maxPositionUsd * (isNum(L.sizeMult) ? L.sizeMult : 1), pct = isNum(mp) && isNum(posUsd[m]) ? Math.abs(posUsd[m]) / mp : null;
     const st = paused[m] ? `<span class="warn">tạm dừng: ${esc(paused[m])}</span>` : quoting[m] ? "đang báo giá" : "chưa báo giá";
-    return `<div><b>${esc(m)}</b>: ${fmt(pos[m], 4)} (${sgn(posUsd[m])} USD)${pct !== null ? ` · ${(pct * 100).toFixed(0)}% giới hạn ${mp}` : ""}<br><span class="muted">giá ${fmt(mids[m])} · ${st}</span></div>`;
+    return `<div><b>${esc(m)}</b>: ${fmt(pos[m], 4)} (${sgn(posUsd[m])} USD)${pct !== null ? ` · ${(pct * 100).toFixed(0)}% giới hạn đang áp dụng ${fmt(mp, 1)} USD` : ""}<br><span class="muted">giá ${fmt(mids[m])} · ${st}</span></div>`;
   });
   k.push(`<div class="card"><h2>Vị thế</h2>${rows.join("") || '<div class="big">–</div>'}</div>`);
 
