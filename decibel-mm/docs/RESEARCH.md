@@ -34,6 +34,15 @@ before real money is used.
 `npm run check` also confirmed mainnet market names use a slash (`BTC/USD`), and `perp_equity_balance`
 is reported in plain USD.
 
+**Where a maker rebate can come from (from the SDK types, unverified until `npm run check` prints the live numbers):**
+
+- `fee_schedule.tiers.market_maker[]`: tiers judged on `maker_fraction_threshold`, the share of your fee-window
+  volume that is maker, each with a `maker` rate. Staying ~100 % maker is therefore worth money in itself, and every
+  taker fill (including emergency IOC reduces and orders that cross the book) works against it.
+- `fee_schedule.tiers.vip[]`: tiers by volume, each with maker and taker rates.
+- `referral_discount` / `active_referral_discount`.
+- Campaigns of type `maker_incentive` and `fee_rebate` (`campaigns.getActive`, claimed with `claimCampaignReward`).
+
 Consequence: at tier 0 a maker **pays** 1.1 bps. There is no negative maker fee in this
 schedule, so "rebate" income, if any, comes from campaigns (below), not the fee tier.
 The bot reads the real rates per subaccount (`userFees`) at runtime and does not hard-code these.

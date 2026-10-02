@@ -67,6 +67,7 @@ export class MarketMaker {
   private halted = false;
   private lastMid = new Map<string, number>();
   private fillCount = 0;
+  private takerFills = 0;
   private tripCount = 0;
   private gasDay = "";
   private gasDayBase = 0;
@@ -126,6 +127,10 @@ export class MarketMaker {
       if (!st) continue;
       st.dirty = true; // resting sizes changed; re-send the full ladder
       this.fillCount++;
+      if (!f.isMaker) {
+        this.takerFills++;
+        this.log("warn", "taker fill: paid the taker fee and lowered the maker share", { market: f.market, px: f.price, sz: f.size });
+      }
       this.points.onFill(f, this.lastMid.get(f.market) ?? f.price);
       this.log("info", "fill", { market: f.market, side: f.side, px: f.price, sz: f.size, maker: f.isMaker, fee: round(f.feeUsd, 4) });
     }
@@ -383,6 +388,7 @@ export class MarketMaker {
         streakSecured: s.streakSecured,
         rampStage: this.ramp.stage,
         sizeMult: this.ramp.mult,
+        takerFills: this.takerFills,
         fuseTripsLastHour: fuses,
         positions,
         ...(gasNow ? { txCount: gasNow.txCount, gasApt: round(gasNow.gasApt, 6), signerAptBalance: gasNow.balanceApt === null ? null : round(gasNow.balanceApt, 4) } : {}),
@@ -410,6 +416,7 @@ export class MarketMaker {
         makerVolumeUsd: round(s.dayMakerVolumeUsd, 2),
         ampsToday: snap.ampsToday,
         totalPoints: snap.totalPoints ?? null,
+        makerFraction: snap.makerFraction ?? null,
         tradingAmpsToday: snap.tradingAmpsToday,
         streakAmpsToday: snap.streakAmpsToday,
         currentStreak: snap.currentStreak,

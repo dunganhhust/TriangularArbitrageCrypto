@@ -77,6 +77,19 @@ and set `risk.maxDrawdownUsd` to the loss you accept.
 only makes sense if you are knowingly buying points; the controller will widen if measured cost
 exceeds the budget, but only after it has seen `points.minSampleUsd` of volume.
 
+## Fee rebate is the main goal
+
+The bot only rests limit orders on both sides, so it is already a maker; the fee *level* is what matters.
+At tier 0 a maker pays 1.5 bps, so rebates must come from one of: the **market-maker fee tier** (judged on the
+share of your volume that is maker), a **volume tier**, a **referral discount**, or a **`maker_incentive` /
+`fee_rebate` campaign**. `npm run check` prints all of them (`fees.marketMakerTiers`, `fees.volumeTiers`,
+`campaigns.active`, `campaigns.mine`) so you can see what is actually on offer and how far you are from it.
+
+What the bot does for it: it judges every fill maker or taker from the fee actually charged (a quote that crossed
+the book is a taker fill and is logged as `taker fill`), tracks `takerFills` in `status`, and logs `makerFraction`
+in `data/points_log.csv`. Emergency reduces are IOC taker orders and count against the maker share, so keep
+positions small enough that they never trigger.
+
 ## Protection against fast markets, front-running and bigger bots
 
 | Feature | What it does | Config |

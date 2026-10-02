@@ -20,6 +20,7 @@ import type { DecibelConfig, SendTxOpts } from "@decibeltrade/sdk";
 import type { LiveEnv } from "../config.js";
 import type { AccountInfo, Book, BookLevel, Fill, Ladder, MarketSpec, PointsSnapshot, PriceInfo } from "../types.js";
 import type { Exchange, GasStats, ReduceRequest } from "./exchange.js";
+import { feeWindow, inferFee } from "./fees.js";
 
 type Units = "human" | "chain";
 
@@ -425,7 +426,10 @@ export class DecibelExchange implements Exchange {
       if (!side) continue;
       const price = r.price / this.pxScale(name);
       const size = r.size / this.szScale(name);
-      const isMaker = !(r.client_order_id ?? "").startsWith("tk-");
+      // Judge maker/taker by the fee actually charged; fall back to how we sent the order.
+      const inferred = inferFee(r.fee_amount, r.is_rebate, price * size, this.makerRate, this.takerRate);
+      const sentAsTaker = (r.client_order_id ?? "").startsWith("tk-");
+      const isMaker = inferred && this.makerRate !== this.takerRate ? inferred.isMaker : !sentAsTaker;
       const rate = isMaker ? this.makerRate : this.takerRate;
       this.fills.push({
         id: r.trade_id,
@@ -433,7 +437,7 @@ export class DecibelExchange implements Exchange {
         side,
         price,
         size,
-        feeUsd: price * size * (r.is_rebate ? -Math.abs(rate) : rate),
+        feeUsd: inferred ? inferred.feeUsd : price * size * (r.is_rebate ? -Math.abs(rate) : rate),
         isMaker,
         ts: r.transaction_unix_ms,
       });
@@ -588,6 +592,9 @@ export class DecibelExchange implements Exchange {
       snap.makerFeeRate = this.makerRate;
       snap.takerFeeRate = this.takerRate;
       snap.feeTier = fees.value.fee_tier as unknown as number;
+      const w = feeWindow(fees.value.daily_user_volume);
+      snap.makerFraction = w.makerFraction;
+      snap.volume30dUsd = w.totalUsd;
     }
     return snap;
   }
@@ -635,9 +642,67 @@ export class DecibelExchange implements Exchange {
           }),
         )
         .catch((e: unknown) => ({ error: String(e).slice(0, 200) })),
+      fees: await this.feeReport(),
+      campaigns: await this.campaignReport(),
       execution: await this.executionInfo(),
       signer: { address: this.write.account.accountAddress.toString(), aptBalance: this.balanceApt, paysGas: true },
       points: await this.getPoints(),
+    };
+  }
+
+  /** The full fee ladder: where a maker rebate would come from, and how far this account is from it. */
+  private async feeReport(): Promise<Record<string, unknown>> {
+    try {
+      const f = await this.read.userFees.getByAddr({ subAddr: this.o.env.subaccount });
+      const w = feeWindow(f.daily_user_volume);
+      const bps = (x: number): number => Number((x * 1e4).toFixed(3));
+      return {
+        tier: f.fee_tier,
+        makerBps: bps(f.user_maker_rate),
+        takerBps: bps(f.user_taker_rate),
+        referralDiscount: f.fee_schedule.referral_discount,
+        activeReferralDiscount: f.active_referral_discount,
+        volumeTiers: f.fee_schedule.tiers.vip.map((t) => ({ volumeAtLeastUsd: t.volume_threshold, makerBps: bps(t.maker), takerBps: bps(t.taker) })),
+        // Tiers judged on the share of volume that is maker; a negative makerBps is a rebate.
+        marketMakerTiers: f.fee_schedule.tiers.market_maker.map((t) => ({ makerFractionAtLeast: t.maker_fraction_threshold, makerBps: bps(t.maker) })),
+        window: { ...w, days: f.daily_user_volume.length },
+      };
+    } catch (e) {
+      return { error: String(e).slice(0, 200) };
+    }
+  }
+
+  /** Campaigns that can pay rebates/incentives, and what this owner has earned so far. */
+  private async campaignReport(): Promise<Record<string, unknown>> {
+    const iso = (s: number): string => new Date(s * 1000).toISOString();
+    const [active, summary] = await Promise.allSettled([
+      this.read.campaigns.getActive(),
+      this.read.campaigns.getSummary({ accountAddress: this.o.env.owner, limit: 20, offset: 0 }),
+    ]);
+    return {
+      active:
+        active.status === "fulfilled"
+          ? active.value.map((c) => ({
+              id: c.campaignId,
+              type: c.campaignType,
+              title: c.title,
+              rewardAsset: c.rewardAsset,
+              runs: `${iso(c.startTsSec)} .. ${iso(c.endTsSec)}`,
+              claimable: `${iso(c.claimStartTsSec)} .. ${iso(c.claimEndTsSec)}`,
+              totalFunded: c.totalFunded,
+              description: c.description,
+            }))
+          : { error: String((active.reason as Error)?.message ?? active.reason).slice(0, 200) },
+      mine:
+        summary.status === "fulfilled"
+          ? {
+              lifetimeEarned: summary.value.lifetimeEarned,
+              readyToClaim: summary.value.readyToClaim,
+              totalClaimed: summary.value.totalClaimed,
+              byType: summary.value.breakdownByType,
+              note: "raw token units; USDC amounts divide by 1e6",
+            }
+          : { error: String((summary.reason as Error)?.message ?? summary.reason).slice(0, 200) },
     };
   }
 
@@ -678,6 +743,7 @@ interface TradeRow {
   size: number;
   price: number;
   is_rebate: boolean;
+  fee_amount?: number;
   client_order_id?: string;
   transaction_unix_ms: number;
 }

@@ -71,6 +71,8 @@ export interface PointsSnapshot {
   feeTier: number | null;
   /** Lifetime trading points for the owner (public endpoint; `tradingAmps` is internal-only). */
   totalPoints?: number | null;
+  /** Share of the fee-window volume that was maker (what market-maker fee tiers are judged on). */
+  makerFraction?: number | null;
   /** Endpoints that failed (as opposed to returning empty data), for diagnostics. */
   unavailable?: string[];
 }
