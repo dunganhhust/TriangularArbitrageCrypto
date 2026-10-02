@@ -613,6 +613,14 @@ export class DecibelExchange implements Exchange {
       network: this.o.network,
       subaccount: this.o.env.subaccount,
       // Configured markets in human units: what you need to size quotes (min order value in USD).
+      marketActivity: await this.read.marketContexts
+        .getAll()
+        .then((rows) =>
+          rows
+            .filter((r) => this.specs.has(this.byAddr.get(r.market.toLowerCase()) ?? r.market) || [...this.specs.values()].some((sp) => sp.addr.toLowerCase() === r.market.toLowerCase()))
+            .map((r) => ({ market: this.byAddr.get(r.market.toLowerCase()) ?? r.market, volume24h: r.volume_24h, openInterest: r.open_interest, change24hPct: r.price_change_pct_24h })),
+        )
+        .catch((e: unknown) => ({ error: String(e).slice(0, 160) })),
       configured: [...this.specs.values()].map((sp) => {
         const mid = this.prices.get(sp.name)?.mid ?? null;
         const lev = markets.find((m) => m.market_name === sp.name)?.max_leverage ?? null;
