@@ -29,6 +29,11 @@ before real money is used.
 | 5 | > $4B | 1.90 | 0.00 |
 | 6 | > $15B | 1.80 | 0.00 |
 
+**Observed on mainnet (2026-10-02, fee tier 0, via `userFees`):** maker 0.015% (1.5 bps), taker 0.045%
+(4.5 bps) — higher than the table above, so always trust the live `userFees` values the bot logs.
+`npm run check` also confirmed mainnet market names use a slash (`BTC/USD`), and `perp_equity_balance`
+is reported in plain USD.
+
 Consequence: at tier 0 a maker **pays** 1.1 bps. There is no negative maker fee in this
 schedule, so "rebate" income, if any, comes from campaigns (below), not the fee tier.
 The bot reads the real rates per subaccount (`userFees`) at runtime and does not hard-code these.

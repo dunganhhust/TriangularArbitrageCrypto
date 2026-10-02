@@ -409,6 +409,10 @@ export class DecibelExchange implements Exchange {
       this.read.tier.getByOwner({ ownerAddr: owner }),
       this.read.userFees.getByAddr({ subAddr: subaccount }),
     ]);
+    const names = ["tradingAmps", "streaks", "tier", "userFees"] as const;
+    snap.unavailable = [daily, streak, tier, fees]
+      .map((r, i) => (r.status === "rejected" ? `${names[i]}: ${String((r.reason as Error)?.message ?? r.reason).slice(0, 120)}` : ""))
+      .filter(Boolean);
     if (daily.status === "fulfilled") {
       const today = [...daily.value.days].sort((a, b) => b.day_start_unix_ms - a.day_start_unix_ms)[0];
       if (today) {
@@ -435,6 +439,22 @@ export class DecibelExchange implements Exchange {
     return {
       network: this.o.network,
       subaccount: this.o.env.subaccount,
+      // Configured markets in human units: what you need to size quotes (min order value in USD).
+      configured: [...this.specs.values()].map((sp) => {
+        const mid = this.prices.get(sp.name)?.mid ?? null;
+        const lev = markets.find((m) => m.market_name === sp.name)?.max_leverage ?? null;
+        return {
+          name: sp.name,
+          pxDecimals: sp.pxDecimals,
+          szDecimals: sp.szDecimals,
+          tickSize: sp.tickSize,
+          lotSize: sp.lotSize,
+          minSize: sp.minSize,
+          mid,
+          minOrderUsd: mid === null ? null : Number((sp.minSize * mid).toFixed(2)),
+          maxLeverage: lev,
+        };
+      }),
       markets: markets.map((m) => ({ name: m.market_name, tick: m.tick_size, lot: m.lot_size, min: m.min_size, maxLev: m.max_leverage, mode: m.mode })),
       equity: this.account?.equityUsd,
       points: await this.getPoints(),

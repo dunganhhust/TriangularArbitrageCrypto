@@ -67,6 +67,12 @@ Per market: `maxPositionUsd`, `levelSizeUsd`, `levels`, `baseHalfSpreadBps`, `le
 `inventorySkewBps`, `minHalfSpreadBps`, `volK`. Global sections `points`, `risk`, `engine`, `live`,
 `paper` — all defaults are in `src/config.ts`. Start small: `maxPositionUsd` of a few hundred USD.
 
+**Size to your equity.** Positions are margined: with e.g. $20 of equity and 10x max leverage, a
+`maxPositionUsd` of 500 (the example) cannot be held and risks liquidation. Keep `maxPositionUsd`
+to a small multiple of equity at most, `levelSizeUsd` above the market's minimum order
+(`npm run check` prints `minOrderUsd` per configured market; levels below it are silently dropped),
+and set `risk.maxDrawdownUsd` to the loss you accept.
+
 `minHalfSpreadBps` is a floor. At fee tier 0 a maker pays ~1.1 bps, so a 0.6 bps half spread
 only makes sense if you are knowingly buying points; the controller will widen if measured cost
 exceeds the budget, but only after it has seen `points.minSampleUsd` of volume.
