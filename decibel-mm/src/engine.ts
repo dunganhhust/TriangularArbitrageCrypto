@@ -279,6 +279,7 @@ export class MarketMaker {
         dayVolumeUsd: round(s.dayVolumeUsd, 2),
         makerVolumeUsd: round(s.dayMakerVolumeUsd, 2),
         ampsToday: snap.ampsToday,
+        totalPoints: snap.totalPoints ?? null,
         tradingAmpsToday: snap.tradingAmpsToday,
         streakAmpsToday: snap.streakAmpsToday,
         currentStreak: snap.currentStreak,

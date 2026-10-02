@@ -430,14 +430,15 @@ export class DecibelExchange implements Exchange {
       volume30dUsd: null,
       feeTier: null,
     };
-    const [daily, streak, tier, fees] = await Promise.allSettled([
+    const [daily, streak, tier, fees, total] = await Promise.allSettled([
       this.read.tradingAmps.getDailyByOwner({ ownerAddr: owner, days: 2 }),
       this.read.streaks.getByOwner({ ownerAddr: owner }),
       this.read.tier.getByOwner({ ownerAddr: owner }),
       this.read.userFees.getByAddr({ subAddr: subaccount }),
+      this.read.tradingPoints.getByOwner({ ownerAddr: owner }),
     ]);
-    const names = ["tradingAmps", "streaks", "tier", "userFees"] as const;
-    snap.unavailable = [daily, streak, tier, fees]
+    const names = ["tradingAmps", "streaks", "tier", "userFees", "tradingPoints"] as const;
+    snap.unavailable = [daily, streak, tier, fees, total]
       .map((r, i) => (r.status === "rejected" ? `${names[i]}: ${String((r.reason as Error)?.message ?? r.reason).slice(0, 120)}` : ""))
       .filter(Boolean);
     if (daily.status === "fulfilled") {
@@ -448,6 +449,7 @@ export class DecibelExchange implements Exchange {
         snap.streakAmpsToday = today.streak_amps;
       }
     }
+    if (total.status === "fulfilled") snap.totalPoints = total.value.total_points;
     if (streak.status === "fulfilled") snap.currentStreak = streak.value.currentStreak;
     if (tier.status === "fulfilled") snap.tier = tier.value.current_tier;
     if (fees.status === "fulfilled") {

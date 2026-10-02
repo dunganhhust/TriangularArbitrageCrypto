@@ -69,6 +69,8 @@ export interface PointsSnapshot {
   takerFeeRate: number | null;
   volume30dUsd: number | null;
   feeTier: number | null;
+  /** Lifetime trading points for the owner (public endpoint; `tradingAmps` is internal-only). */
+  totalPoints?: number | null;
   /** Endpoints that failed (as opposed to returning empty data), for diagnostics. */
   unavailable?: string[];
 }

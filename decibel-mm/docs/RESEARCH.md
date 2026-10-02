@@ -54,6 +54,11 @@ Known from public pages and SDK types:
 - `campaigns` types include `maker_incentive` and `fee_rebate` — these are the likely sources of
   any maker rebate. Reward amounts are claimed with `claimCampaignReward(id)`.
 
+**Observed on mainnet (2026-10-02):** `tradingAmps` (per-day Amps) returned `HTTP 403 (Forbidden): internal only`
+for a normal API key, so daily Amps cannot be read via the public API. `streaks`, `tier` and `userFees` responded.
+The bot therefore also reads `tradingPoints` (lifetime total) and logs it as `totalPoints`; compute Amps per dollar
+from the *change* in `totalPoints` against traded volume between rows of `data/points_log.csv`.
+
 **UNVERIFIED / not public:** the exact Amps-per-dollar formula, whether maker and taker volume
 are weighted differently, the streak volume threshold, and any wash-trading filters.
 
