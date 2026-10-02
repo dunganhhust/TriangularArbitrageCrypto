@@ -96,6 +96,8 @@ export function startDashboard(o: DashboardOpts): Promise<Server> {
         const rangeSec = Number(q.get("range"));
         const rangeMs = Number.isFinite(rangeSec) && rangeSec > 0 && rangeSec <= MAX_RANGE_SEC ? Math.round(rangeSec * 1000) : null;
         const market = q.get("market") || null;
+        const runId = Number(q.get("run"));
+        const runStart = Number.isFinite(runId) && runId > 0 ? runId : null;
         const data = analyze(tail.read(), {
           now: Date.now(),
           staleMs,
@@ -103,6 +105,7 @@ export function startDashboard(o: DashboardOpts): Promise<Server> {
           killFile: existsSync(o.killFile),
           rangeMs,
           market,
+          runStart,
           live: liveFile.read(),
         });
         data.aptPrice = px;

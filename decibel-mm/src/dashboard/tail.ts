@@ -5,7 +5,7 @@ import type { LogLine } from "./analyze.js";
 /**
  * Follows the bot's JSON-lines log. The first read takes only the last `initialBytes` of the file;
  * after that every call parses just the bytes appended since, so polling once a second stays cheap
- * however long the run gets. Only the latest run is kept in memory.
+ * however long the run gets. Earlier runs stay in memory (up to `maxLines` lines) so the dashboard can show the history.
  */
 export class LogTail {
   private lines: LogLine[] = [];
@@ -75,14 +75,7 @@ export class LogTail {
     const fresh = parseLog(buf.subarray(0, end + 1).toString("utf8"));
     this.offset = at + end + 1;
     if (!fresh.length) return;
-    let all = this.lines.concat(fresh);
-    // A new run supersedes everything before its start marker.
-    for (let i = all.length - 1; i >= 0; i--) {
-      if (all[i]!.msg === "market maker started") {
-        all = all.slice(i);
-        break;
-      }
-    }
+    const all = this.lines.concat(fresh);
     this.lines = all.length > this.maxLines ? all.slice(all.length - this.maxLines) : all;
   }
 }

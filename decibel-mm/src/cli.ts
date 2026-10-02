@@ -86,6 +86,9 @@ async function runDashboard(cfg: Config, configPath: string): Promise<void> {
   const control = process.argv.includes("--control")
     ? { configPath, envFile: arg("--env-file") ?? "/etc/decibel-mm/env" }
     : null;
+  // The dashboard only reads files and answers HTTP: an unexpected error in one request must not take it down.
+  process.on("unhandledRejection", (e) => console.error("dashboard: unhandled rejection (continuing)", e));
+  process.on("uncaughtException", (e) => console.error("dashboard: uncaught exception (continuing)", e));
   await startDashboard({
     port,
     logFile: cfg.engine.runLogFile,

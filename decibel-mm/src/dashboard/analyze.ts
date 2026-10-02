@@ -36,6 +36,8 @@ export interface AnalyzeOpts {
   market?: string | null;
   /** Parsed contents of live.json, if present. */
   live?: Record<string, unknown> | null;
+  /** Look at an earlier run: its start time (a RunSummary id). Default: the latest run. */
+  runStart?: number | null;
 }
 
 const STOP_MSG = "shutting down, cancelling quotes";
@@ -58,10 +60,28 @@ export function parseLog(text: string): LogLine[] {
   return out;
 }
 
+/** Every run in the log, oldest first. A run starts at a "market maker started" marker. */
+export function splitRuns(lines: LogLine[]): LogLine[][] {
+  const runs: LogLine[][] = [];
+  const headless: LogLine[] = [];
+  let cur: LogLine[] | null = null;
+  for (const l of lines) {
+    if (l.msg === "market maker started") {
+      cur = [l];
+      runs.push(cur);
+    } else if (cur) cur.push(l);
+    else headless.push(l);
+  }
+  // A log with no start marker at all (written by a very old bot) is treated as one run; a partial run cut off by the
+  // read window, followed by real runs, is dropped.
+  if (!runs.length && headless.length) runs.push(headless);
+  return runs;
+}
+
 /** Lines of the most recent run: everything from the last "market maker started" marker. */
 export function lastRun(lines: LogLine[]): LogLine[] {
-  for (let i = lines.length - 1; i >= 0; i--) if (lines[i]!.msg === "market maker started") return lines.slice(i);
-  return lines;
+  const r = splitRuns(lines);
+  return r.length ? r[r.length - 1]! : [];
 }
 
 const numOnly = (x: unknown): Record<string, number> => {
@@ -131,6 +151,87 @@ export interface FillRow {
   fee: number;
 }
 
+export type RunOutcome = "running" | "closed" | "residual" | "halted" | "signal" | "unknown";
+
+/** One line of the run history: enough to recognise a run and see how it ended. */
+export interface RunSummary {
+  /** Start time (ms): the value to pass back as `run` to look at it. */
+  id: number;
+  startedAt: number;
+  endedAt: number;
+  dryRun: boolean;
+  markets: string[];
+  plannedMinutes: number | null;
+  fills: number;
+  volumeUsd: number;
+  equityStart: number | null;
+  equityEnd: number | null;
+  equityDelta: number | null;
+  gasApt: number | null;
+  txCount: number | null;
+  outcome: RunOutcome;
+  reason: string | null;
+  residual: Record<string, number>;
+}
+
+export function summarizeRun(run: LogLine[], isLatest: boolean, now: number, staleMs: number): RunSummary {
+  const start = run.find((l) => l.msg === "market maker started") ?? null;
+  const first = run[0]!;
+  const last = run[run.length - 1]!;
+  const startedAt = start?.ts ?? first.ts;
+  let fills = 0;
+  let volumeUsd = 0;
+  let firstEq: number | null = null;
+  let lastStatus: LogLine | null = null;
+  let halt: LogLine | null = null;
+  let signal = false;
+  let finished: LogLine | null = null;
+  for (const l of run) {
+    if (l.msg === "fill") {
+      fills++;
+      volumeUsd += (num(l.px) ?? 0) * (num(l.sz) ?? 0);
+    } else if (l.msg === "status") {
+      if (firstEq === null) firstEq = num(l.startEquity) ?? num(l.equity);
+      lastStatus = l;
+    } else if (l.msg === "run finished") finished = l;
+    else if (l.level === "error" && l.msg === "HALT") halt = l;
+    else if (l.msg === STOP_MSG) signal = true;
+  }
+  const equityEnd = num(lastStatus?.equity);
+  const endsAtIso = typeof start?.endsAt === "string" ? Date.parse(start.endsAt) : NaN;
+  let outcome: RunOutcome;
+  let reason: string | null = null;
+  let residual: Record<string, number> = {};
+  if (finished) {
+    outcome = finished.flat === true ? "closed" : "residual";
+    reason = String(finished.reason ?? "");
+    residual = numOnly(finished.residual);
+  } else if (halt) {
+    outcome = "halted";
+    reason = String(halt.reason ?? "");
+  } else if (signal) outcome = "signal";
+  else if (isLatest && now - last.ts <= staleMs) outcome = "running";
+  else outcome = "unknown";
+  return {
+    id: startedAt,
+    startedAt,
+    endedAt: last.ts,
+    dryRun: start?.dryRun === true,
+    markets: Array.isArray(start?.markets) ? (start!.markets as unknown[]).map(String) : [],
+    plannedMinutes: Number.isFinite(endsAtIso) ? Math.round((endsAtIso - startedAt) / 60_000) : null,
+    fills,
+    volumeUsd,
+    equityStart: firstEq,
+    equityEnd,
+    equityDelta: firstEq !== null && equityEnd !== null ? equityEnd - firstEq : null,
+    gasApt: num(lastStatus?.gasApt),
+    txCount: num(lastStatus?.txCount),
+    outcome,
+    reason,
+    residual,
+  };
+}
+
 export interface DashboardData {
   generatedAt: number;
   logLines: number;
@@ -148,12 +249,17 @@ export interface DashboardData {
     ageSec: number | null;
     uptimeSec: number | null;
     liveSeen: boolean;
+    /** Start time of the run being shown, and whether it is the newest one. */
+    id: number | null;
+    isLatest: boolean;
     /** Planned end (epoch ms) when the run was started with a duration. */
     endsAt: number | null;
     remainingSec: number | null;
     /** How the run ended, once it has: the reason and whether every position was closed. */
     finish: { reason: string; closed: boolean; residual: Record<string, number>; dust: Record<string, number> } | null;
   };
+  /** The run history, newest first. */
+  runs: RunSummary[];
   alerts: Alert[];
   config: { marketCfg: unknown[]; limits: Record<string, unknown> };
   latest: Record<string, unknown> | null;
@@ -232,7 +338,11 @@ export interface DashboardData {
 export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
   const maxPts = o.maxSeriesPoints ?? 600;
   const maxRows = o.maxRows ?? 200;
-  const run = lastRun(all);
+  const runsAll = splitRuns(all);
+  const latestRun = runsAll.length ? runsAll[runsAll.length - 1]! : [];
+  const picked = o.runStart != null ? runsAll.find((r) => (r.find((l) => l.msg === "market maker started") ?? r[0])?.ts === o.runStart) : undefined;
+  const run = picked ?? latestRun;
+  const isLatest = run === latestRun;
   const start = run.find((l) => l.msg === "market maker started") ?? null;
   const last = run.length ? run[run.length - 1]! : null;
   const startedAt = start?.ts ?? run[0]?.ts ?? null;
@@ -244,7 +354,7 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
   // --- live snapshot (1 s) -------------------------------------------------------------------
   let live: Record<string, unknown> | null = null;
   let liveTs: number | null = null;
-  if (o.live && typeof o.live.t === "string") {
+  if (isLatest && o.live && typeof o.live.t === "string") {
     const ts = Date.parse(o.live.t);
     const samePid = start?.pid === undefined || o.live.pid === start.pid;
     const thisRun = startedAt === null || ts >= startedAt - 1000;
@@ -298,6 +408,9 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
   } else if (stopped) {
     state = "stopped";
     detail = "Bot đã dừng sạch (đã hủy lệnh, vị thế giữ nguyên).";
+  } else if (!isLatest) {
+    state = "stopped";
+    detail = "Phiên cũ: kết thúc không có dòng kết thúc (dừng bằng tín hiệu, mất điện, hoặc tiến trình chết).";
   } else if (ageMs !== null && ageMs > staleAfter) {
     state = "stale";
     detail = `Không có tín hiệu mới trong ${Math.round(ageMs / 1000)} giây: tiến trình có thể đã chết${endingLine ? " khi đang đóng vị thế" : ""}.`;
@@ -600,10 +713,13 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
       ageSec: ageMs !== null ? Math.round(ageMs / 1000) : null,
       uptimeSec: startedAt !== null && hasActivity ? Math.round(((state === "running" ? o.now : lastActivity) - startedAt) / 1000) : null,
       liveSeen: liveTs !== null,
+      id: startedAt,
+      isLatest,
       endsAt,
       remainingSec,
       finish,
     },
+    runs: runsAll.map((r, i) => summarizeRun(r, i === runsAll.length - 1, o.now, o.staleMs)).reverse().slice(0, 40),
     alerts,
     config: { marketCfg, limits },
     latest,

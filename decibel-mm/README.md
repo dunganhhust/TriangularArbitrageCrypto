@@ -87,7 +87,10 @@ may have died while orders are still on-chain), taker fills, low APT, an open fu
 It has no login and cannot control the bot, so it only listens on `127.0.0.1`. To see a VM's dashboard from
 your own machine, tunnel the port: `gcloud compute ssh <vm> --zone <zone> -- -L 8787:localhost:8787`, then
 open `http://localhost:8787` (in Cloud Shell use `-L 8080:localhost:8787` and the Web Preview on port 8080).
-Only the latest run (everything after the last `market maker started` line) is shown.
+The page opens on the newest run. Every earlier run stays in `data/run.log` and is listed under "Lịch sử phiên chạy" (and in
+the "Phiên" selector): start time, length, mode, markets, fills, volume, change in equity, gas and how it ended (deadline with
+every position closed, a position left open, halted by the bot, stopped by a signal). Click a row to look at that run; the page
+says clearly that it is an older run and offers a link back. The choice is not remembered across reloads on purpose.
 
 ## Run for a set time, then close everything
 
@@ -134,6 +137,17 @@ also works for a bot started by hand. Safety of the buttons:
   can start and stop trading, so treat the token like a key.
 - Start is refused while a bot is running (seen via its pid file or a fresh `live.json`), while `state/KILL` exists, or
   if the key file or config is missing or invalid.
+
+## Keeping the dashboard reachable
+
+The page is reached through an SSH tunnel, and two different things can make it "die":
+
+- **The tunnel** (Cloud Shell closes, the SSH session drops). Symptom: "Unable to forward your request to a backend". Check on
+  the VM with `curl -s localhost:8787/healthz`: `ok` means the dashboard is fine. Use a tunnel that reconnects itself:
+  `while true; do gcloud compute ssh <vm> --zone <zone> -- -N -L 8080:localhost:8787 -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes; sleep 3; done`
+- **The dashboard process** (a crash, a reboot of the VM). Run it as a service: see `deploy/decibel-dashboard.service`
+  (install steps in its header). The unit sets `KillMode=process` on purpose: a bot started from the buttons is a child of the
+  dashboard, and the default would kill it, with its orders still resting, whenever the service restarts.
 
 ## Several markets
 

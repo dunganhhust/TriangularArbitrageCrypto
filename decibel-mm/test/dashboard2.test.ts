@@ -258,9 +258,9 @@ describe("incremental log tail", () => {
     appendFileSync(f, half.slice(20) + "\n");
     expect(tail.read().map((l) => l.msg)).toEqual(["market maker started", "status", "fill"]);
 
-    // A new run supersedes the old one in memory.
+    // A new run is added after the old one; the old one stays available for the history.
     appendFileSync(f, line(5000, "info", "market maker started", { pid: 7 }) + "\n" + status(6000) + "\n");
-    expect(tail.read().map((l) => l.msg)).toEqual(["market maker started", "status"]);
+    expect(tail.read().map((l) => l.msg)).toEqual(["market maker started", "status", "fill", "market maker started", "status"]);
   });
 
   it("starts over when the file is replaced by a shorter one, and copes with a missing file", () => {
