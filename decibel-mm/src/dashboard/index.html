@@ -294,8 +294,9 @@ function render(d) {
   setHTML("markets", d.markets.map((m) => {
     const col = `var(${MCOL[Math.max(0, names.indexOf(m.name)) % MCOL.length]})`;
     const pct = isNum(m.capUsd) && m.capUsd > 0 && isNum(m.positionUsd) ? Math.min(1, Math.abs(m.positionUsd) / m.capUsd) : null;
-    const fz = m.fuse === "tripped" ? `<span class="warn">cầu chì ngắt${m.fuseUntil ? " · còn " + Math.max(0, Math.ceil((m.fuseUntil - d.generatedAt) / 1000)) + "s" : ""}</span>` : m.fuse === "recovering" ? "đang hồi phục (báo giá rộng hơn)" : "cầu chì bình thường";
-    const st = m.paused ? `<span class="warn">tạm dừng: ${esc(m.paused)}</span>` : m.quoting ? "đang báo giá" : m.quoting === false ? "chưa báo giá" : "–";
+    const alive = r.state === "running" || r.state === "finishing";
+    const fz = !alive ? "bot đã dừng" : m.fuse === "tripped" ? `<span class="warn">cầu chì ngắt${m.fuseUntil ? " · còn " + Math.max(0, Math.ceil((m.fuseUntil - d.generatedAt) / 1000)) + "s" : ""}</span>` : m.fuse === "recovering" ? "đang hồi phục (báo giá rộng hơn)" : "cầu chì bình thường";
+    const st = !alive ? "không báo giá" : m.paused ? `<span class="warn">tạm dừng: ${esc(m.paused)}</span>` : m.quoting ? "đang báo giá" : m.quoting === false ? "chưa báo giá" : "–";
     return `<div class="card mk"><h2><span style="color:${col}">● ${esc(m.name)}</span><span class="muted">${st}</span></h2>
       <div class="big">${fmt(m.mid, m.mid > 1000 ? 1 : 3)}</div>
       <div class="sub">mua ${fmt(m.bid, m.mid > 1000 ? 1 : 3)} · bán ${fmt(m.ask, m.mid > 1000 ? 1 : 3)} · chênh ${fmt(m.spreadBps, 2)} bps · ${fz}</div>
@@ -391,7 +392,7 @@ $("ctlPresets").addEventListener("click", (ev) => {
   if (!b) return;
   S.ctlMin = Number(b.dataset.m); $("ctlMin").value = S.ctlMin; save();
 });
-function say(text, cls) { CTL.msg = text; CTL.msgCls = cls || ""; const m = $("ctlMsg"); m.textContent = text; m.className = cls || ""; }
+function say(text, cls) { CTL.msg = text; CTL.msgCls = cls || ""; CTL.msgAt = Date.now(); const m = $("ctlMsg"); m.textContent = text; m.className = cls || ""; }
 async function post(path, body) {
   CTL.busy = true; if (lastData) renderControl(lastData);
   try {
@@ -442,6 +443,8 @@ function renderControl(d) {
   const warn = legacy + (c.killFile ? '<br><span class="bad">File state/KILL đang tồn tại: không thể bắt đầu cho đến khi xóa nó.</span>' : "") +
     (!c.envFileOk ? '<br><span class="bad">Không thấy file khóa (--env-file): không thể bắt đầu từ dashboard.</span>' : "");
   setHTML("ctlStatus", `${st}<div class="sub">${mk}${warn}</div>`);
+  // A status message is only useful for a few seconds; the panel's own status line says the rest.
+  if (CTL.msg && !CTL.busy && Date.now() - (CTL.msgAt || 0) > 12000 && CTL.msgCls !== "bad") { CTL.msg = ""; $("ctlMsg").textContent = ""; }
   const hasTok = TOKEN.length >= 32;
   $("btnStart").disabled = CTL.busy || c.running || c.killFile || !c.envFileOk || !hasTok || !!cf.error;
   $("btnStop").disabled = CTL.busy || !c.running || c.stopRequested || r.state === "finishing" || !hasTok;
