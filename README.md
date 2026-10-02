@@ -13,3 +13,7 @@ Step 4: Bundle it together
 Refer to this blog to understand more on triangular arbitrage implemented in this repo:  
 https://lakshmi1212.medium.com/automated-triangular-arbitrage-of-cryptos-in-4-steps-a678f7b01ce7
 
+
+## Decibel market maker
+
+`decibel-mm/` contains a points- and rebate-aware market maker for Decibel perps on Aptos. See [decibel-mm/README.md](decibel-mm/README.md).
