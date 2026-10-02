@@ -17,17 +17,21 @@ before real money is used.
   REST `https://api.mainnet.aptoslabs.com/decibel`, WS `wss://api.mainnet.aptoslabs.com/decibel/ws`,
   gas station `https://api.mainnet.aptoslabs.com/gs/v1`.
 
-## Fees (docs.decibel.trade/for-traders/fees, via search snippet)
+## Fees (Decibel app, Fee Schedule dialog, perps, read 2026-10-02)
 
 | Tier | 30d volume | Taker | Maker |
 |---|---|---|---|
-| 0 | < $10M | 3.40 bps | 1.10 bps |
-| 1 | > $10M | 3.00 | 0.90 |
-| 2 | > $50M | 2.50 | 0.60 |
-| 3 | > $200M | 2.20 | 0.30 |
-| 4 | > $1B | 2.10 | 0.00 |
-| 5 | > $4B | 1.90 | 0.00 |
-| 6 | > $15B | 1.80 | 0.00 |
+| 0 | < $1M | 4.50 bps | 1.50 bps |
+| 1 | >= $1M | 4.00 | 1.20 |
+| 2 | >= $5M | 3.50 | 0.80 |
+| 3 | >= $25M | 3.00 | 0.40 |
+| 4 | >= $100M | 2.80 | 0.00 |
+| 5 | >= $250M | 2.60 | 0.00 |
+| 6 | >= $1B | 2.40 | 0.00 |
+
+The dialog says "Maker fees drop to zero at higher tiers". **No volume tier pays a negative maker fee**: the
+best a maker gets from this ladder is 0 bps, at >= $100M of 30-day volume. (An earlier search snippet quoted lower
+numbers, 1.1/3.4 bps at tier 0; it was out of date. Trust the live `userFees` values the bot logs.)
 
 **Observed on mainnet (2026-10-02, fee tier 0, via `userFees`):** maker 0.015% (1.5 bps), taker 0.045%
 (4.5 bps) — higher than the table above, so always trust the live `userFees` values the bot logs.
