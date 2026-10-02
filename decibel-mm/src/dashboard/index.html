@@ -1,0 +1,310 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Decibel MM Dashboard</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1c2330; --muted: #667085; --line: #e3e6ec;
+    --good: #0f9d58; --bad: #d93025; --warn: #e8710a; --info: #1a73e8; --accent: #1a73e8;
+    --good-bg: #e6f4ea; --bad-bg: #fce8e6; --warn-bg: #fef3e0; --info-bg: #e8f0fe;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --card: #1b2029; --ink: #e8ebf1; --muted: #98a2b3; --line: #2b3240;
+      --good: #4cc38a; --bad: #ff6b60; --warn: #ffa94d; --info: #6aa5ff; --accent: #6aa5ff;
+      --good-bg: #17332a; --bad-bg: #3a1f1d; --warn-bg: #3a2a15; --info-bg: #182b4a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1280px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin-bottom: 12px; }
+  h1 { font-size: 18px; margin: 0; }
+  h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  .spacer { flex: 1; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 600; font-size: 12px; }
+  .b-running { background: var(--good-bg); color: var(--good); }
+  .b-stale, .b-halted { background: var(--bad-bg); color: var(--bad); }
+  .b-stopped, .b-no-data { background: var(--info-bg); color: var(--info); }
+  .b-dry { background: var(--warn-bg); color: var(--warn); }
+  .b-live { background: var(--bad-bg); color: var(--bad); }
+  .muted { color: var(--muted); }
+  label.apt { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+  input[type=number] { width: 76px; padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); }
+  .alerts { display: grid; gap: 6px; margin-bottom: 12px; }
+  .alert { padding: 8px 12px; border-radius: 8px; border-left: 4px solid; }
+  .alert.error { background: var(--bad-bg); border-color: var(--bad); }
+  .alert.warn { background: var(--warn-bg); border-color: var(--warn); }
+  .alert.info { background: var(--info-bg); border-color: var(--info); }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-bottom: 12px; }
+  .grid.wide { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-width: 0; overflow-x: auto; }
+  .big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .bar { position: relative; height: 10px; background: var(--line); border-radius: 6px; margin: 8px 0 4px; overflow: hidden; }
+  .bar > i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); }
+  .bar > b { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; }
+  td.r, th.r { text-align: right; }
+  .scroll { max-height: 320px; overflow: auto; }
+  canvas { width: 100%; height: 180px; display: block; }
+  .tag { padding: 1px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+  .t-maker, .t-info { background: var(--good-bg); color: var(--good); }
+  .t-taker, .t-error { background: var(--bad-bg); color: var(--bad); }
+  .t-warn { background: var(--warn-bg); color: var(--warn); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .detail { color: var(--muted); word-break: break-all; }
+  a { color: var(--accent); }
+  footer { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Decibel MM</h1>
+    <span id="state" class="badge b-no-data">…</span>
+    <span id="mode" class="badge"></span>
+    <span id="meta" class="muted"></span>
+    <span class="spacer"></span>
+    <label class="apt">Giá APT (USD) <input id="apt" type="number" step="0.01" min="0.01" value="0.8"></label>
+    <span id="clock" class="muted"></span>
+  </header>
+
+  <div id="alerts" class="alerts"></div>
+
+  <div class="grid" id="kpis"></div>
+
+  <div class="grid wide">
+    <div class="card"><h2>Kinh tế của phiên</h2><table id="econ"></table><div id="econNote" class="sub"></div></div>
+    <div class="card"><h2>Báo giá đang đặt (lần thay gần nhất)</h2><div id="quotes"></div></div>
+  </div>
+
+  <div class="grid wide">
+    <div class="card"><h2>Vốn (USD)</h2><canvas id="c-equity"></canvas></div>
+    <div class="card"><h2>Vị thế (USD, dương = mua/long)</h2><canvas id="c-pos"></canvas></div>
+    <div class="card"><h2>Khối lượng khớp tích lũy (USD)</h2><canvas id="c-vol"></canvas></div>
+    <div class="card"><h2>Số dư APT của ví ký</h2><canvas id="c-apt"></canvas></div>
+  </div>
+
+  <div class="grid wide">
+    <div class="card"><h2>Lệnh khớp gần đây</h2><div class="scroll"><table id="fills"></table></div></div>
+    <div class="card"><h2>Giao dịch đặt lệnh gần đây</h2><div class="scroll"><table id="txs"></table></div></div>
+  </div>
+
+  <div class="card"><h2>Sự kiện (cảnh báo, lỗi, cầu chì, ramp)</h2><div class="scroll"><table id="events"></table></div></div>
+
+  <footer id="foot"></footer>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const isNum = (x) => typeof x === "number" && Number.isFinite(x);
+const fmt = (x, d = 2) => (isNum(x) ? x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }) : "–");
+const sgn = (x, d = 2) => (isNum(x) ? (x > 0 ? "+" : "") + fmt(x, d) : "–");
+const cls = (x) => (!isNum(x) || x === 0 ? "" : x > 0 ? "good" : "bad");
+const hhmmss = (ms) => new Date(ms).toLocaleTimeString("vi-VN", { hour12: false });
+function dur(sec) {
+  if (!isNum(sec)) return "–";
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+  return h ? `${h}g ${m}p` : m ? `${m}p ${s}s` : `${s}s`;
+}
+const STATE_TXT = { "no-data": "CHƯA CÓ LOG", running: "ĐANG CHẠY", stale: "MẤT TÍN HIỆU", stopped: "ĐÃ DỪNG", halted: "BOT TỰ DỪNG" };
+
+try { const a = localStorage.getItem("mm.apt"); if (a) $("apt").value = a; } catch (e) { /* storage may be blocked */ }
+$("apt").addEventListener("change", () => {
+  try { localStorage.setItem("mm.apt", $("apt").value); } catch (e) { /* ignore */ }
+  refresh();
+});
+
+function card(title, big, bigCls, sub) {
+  return `<div class="card"><h2>${esc(title)}</h2><div class="big ${bigCls || ""}">${big}</div><div class="sub">${sub || ""}</div></div>`;
+}
+
+function render(d) {
+  const r = d.run, L = d.latest || {}, e = d.econ;
+  $("state").className = "badge b-" + r.state;
+  $("state").textContent = STATE_TXT[r.state] || r.state;
+  $("state").title = r.detail;
+  $("mode").className = "badge " + (r.dryRun ? "b-dry" : "b-live");
+  $("mode").textContent = r.state === "no-data" ? "" : r.dryRun ? "THỬ (không gửi tx)" : "THẬT";
+  $("meta").textContent = r.state === "no-data" ? r.detail : `${r.network || ""} · ${(r.markets || []).join(", ")} · chạy ${dur(r.uptimeSec)} · log mới nhất ${dur(r.ageSec)} trước`;
+  $("clock").textContent = hhmmss(d.generatedAt);
+
+  $("alerts").innerHTML = d.alerts.map((a) => `<div class="alert ${a.level}">${esc(a.text)}</div>`).join("");
+
+  const cfgOf = (m) => (d.config.marketCfg || []).find((c) => c.name === m) || {};
+  const lim = d.config.limits || {};
+
+  // Equity
+  const ddLim = isNum(lim.maxDrawdownUsd) ? lim.maxDrawdownUsd : null;
+  const ddUsed = isNum(e.equityDelta) && e.equityDelta < 0 && ddLim ? Math.min(1, -e.equityDelta / ddLim) : 0;
+  const k = [];
+  k.push(card("Vốn (equity)", isNum(e.equityNow) ? fmt(e.equityNow) + " USD" : "–", "",
+    `Δ <span class="${cls(e.equityDelta)}">${sgn(e.equityDelta, 3)} USD</span> từ đầu phiên (${fmt(e.equityStart)})` +
+    (ddLim ? `<div class="bar"><i style="width:${(ddUsed * 100).toFixed(0)}%;background:var(--bad)"></i></div>ngưỡng dừng lỗ ${ddLim} USD` : "")));
+
+  // Positions
+  const pos = L.positions || {}, posUsd = L.positionsUsd || {}, mids = L.mids || {}, quoting = L.quoting || {}, paused = L.paused || {};
+  const rows = Object.keys(pos).map((m) => {
+    const mp = cfgOf(m).maxPositionUsd, pct = isNum(mp) && isNum(posUsd[m]) ? Math.abs(posUsd[m]) / mp : null;
+    const st = paused[m] ? `<span class="warn">tạm dừng: ${esc(paused[m])}</span>` : quoting[m] ? "đang báo giá" : "chưa báo giá";
+    return `<div><b>${esc(m)}</b>: ${fmt(pos[m], 4)} (${sgn(posUsd[m])} USD)${pct !== null ? ` · ${(pct * 100).toFixed(0)}% giới hạn ${mp}` : ""}<br><span class="muted">giá ${fmt(mids[m])} · ${st}</span></div>`;
+  });
+  k.push(`<div class="card"><h2>Vị thế</h2>${rows.join("") || '<div class="big">–</div>'}</div>`);
+
+  // Volume
+  const share = e.volumeUsd > 0 ? d.fills.makerVolumeUsd / e.volumeUsd : null;
+  k.push(card("Khối lượng khớp (phiên)", fmt(e.volumeUsd) + " USD", "",
+    `${d.fills.total} lệnh · maker ${share === null ? "–" : (share * 100).toFixed(1) + "%"} khối lượng<br>ngày UTC (cả lần chạy trước): ${fmt(L.dayVolumeUsd, 0)} USD`));
+
+  // Rebate cycle
+  const ratio = isNum(L.cycleMakerRatio) ? L.cycleMakerRatio : null, need = isNum(lim.minMakerRatio) ? lim.minMakerRatio : 0.8;
+  k.push(`<div class="card"><h2>Rebate chu kỳ ${esc(L.cycle || "")}</h2>
+    <div class="big ${ratio === null ? "" : ratio >= need ? "good" : "bad"}">${ratio === null ? "chưa có lệnh khớp" : (ratio * 100).toFixed(1) + "% maker"}</div>
+    <div class="bar"><i style="width:${ratio === null ? 0 : (ratio * 100).toFixed(0)}%"></i><b style="left:${need * 100}%"></b></div>
+    <div class="sub">cần ≥ ${(need * 100).toFixed(0)}% · ${L.rebateEligible === false ? '<span class="bad">KHÔNG đủ điều kiện</span>' : "đủ điều kiện"} · rebate dự kiến ${fmt(L.projectedRebateUsd, 4)} USD</div></div>`);
+
+  // Performance
+  k.push(card("Hiệu quả (EWMA)", sgn(L.pnlBps, 2) + " bps", cls(L.pnlBps),
+    `spreadMult ${fmt(L.spreadMult, 2)} · PnL gộp phiên ${sgn(e.grossPnlBps, 2)} bps`));
+
+  // Fills
+  k.push(card("Khớp lệnh", `${d.fills.maker} maker / ${d.fills.taker} taker`, d.fills.taker ? "warn" : "",
+    `mua ${d.fills.buys} · bán ${d.fills.sells} · phí ${fmt(e.feesUsd, 4)} USD`));
+
+  // Gas
+  k.push(card("Gas (APT)", isNum(e.gasApt) ? fmt(e.gasApt, 5) : "–", "",
+    `${isNum(e.txCount) ? e.txCount : "–"} tx · số dư ví ký ${fmt(e.aptBalance, 4)} APT<br>` +
+    `${isNum(e.gasAptPerHour) ? fmt(e.gasAptPerHour, 4) + " APT/giờ" : ""}${isNum(e.aptRunwayHours) ? " · đủ ~" + fmt(e.aptRunwayHours, 0) + " giờ" : ""}`));
+
+  // Safety
+  k.push(card("An toàn", `ramp ${isNum(L.rampStage) ? L.rampStage : "–"} · ${isNum(L.sizeMult) ? "x" + L.sizeMult : ""}`, "",
+    `cầu chì ngắt ${d.counters.fuseTrips} lần · tạm dừng ${d.counters.pauses} · cảnh báo ${d.counters.warn} · lỗi ${d.counters.error}`));
+  $("kpis").innerHTML = k.join("");
+
+  // Economics
+  const row = (a, b, c) => `<tr><td>${a}</td><td class="r">${b}</td><td class="r muted">${c || ""}</td></tr>`;
+  $("econ").innerHTML =
+    row("Khối lượng khớp", fmt(e.volumeUsd) + " USD") +
+    row("Phí đã trả", fmt(e.feesUsd, 4) + " USD", isNum(e.feeBps) ? fmt(e.feeBps, 2) + " bps" : "") +
+    row("PnL giao dịch gộp (trước phí)", `<span class="${cls(e.grossPnlUsd)}">${sgn(e.grossPnlUsd, 4)} USD</span>`, isNum(e.grossPnlBps) ? sgn(e.grossPnlBps, 2) + " bps" : "") +
+    row("Δ vốn (sau phí, gồm lãi/lỗ chưa chốt)", `<span class="${cls(e.equityDelta)}">${sgn(e.equityDelta, 4)} USD</span>`) +
+    row("Rebate dự kiến (chưa nhận)", sgn(e.rebateUsd, 4) + " USD", fmt(e.rebateBps, 1) + " bps × khối lượng maker") +
+    row("Gas", "−" + fmt(e.gasUsd, 4) + " USD", `${fmt(e.gasApt, 5)} APT × ${fmt(e.aptUsd)} · ${isNum(e.gasBps) ? fmt(e.gasBps, 1) + " bps" : "–"}`) +
+    `<tr><td><b>Ròng ước tính</b></td><td class="r"><b class="${cls(e.netUsd)}">${sgn(e.netUsd, 4)} USD</b></td><td></td></tr>`;
+  const feeNet = isNum(e.feeBps) ? e.feeBps - e.rebateBps : null;
+  $("econNote").innerHTML = isNum(feeNet) && isNum(e.gasBps)
+    ? `Hòa vốn cần PnL gộp ≥ phí ròng ${fmt(feeNet, 2)} bps + gas ${fmt(e.gasBps, 1)} bps = <b>${fmt(feeNet + e.gasBps, 1)} bps</b>; hiện ${sgn(e.grossPnlBps, 2)} bps. Rebate chỉ về sau chu kỳ nếu giữ ≥ ${(need * 100).toFixed(0)}% maker.`
+    : "Cần có lệnh khớp để tính hòa vốn. Ở phiên ngắn, số liệu còn rất nhiễu.";
+
+  // Quotes (latest per market)
+  const seen = new Set(), qhtml = [];
+  for (const t of d.ladders.recent) {
+    if (seen.has(t.market) || !t.quotes) continue;
+    seen.add(t.market);
+    const asks = [...t.quotes.asks].reverse().map((q) => `<tr><td class="bad">bán</td><td class="r">${fmt(q[0], 2)}</td><td class="r">${fmt(q[1], 4)}</td><td class="r muted">${fmt(q[0] * q[1])} USD</td></tr>`).join("");
+    const bids = t.quotes.bids.map((q) => `<tr><td class="good">mua</td><td class="r">${fmt(q[0], 2)}</td><td class="r">${fmt(q[1], 4)}</td><td class="r muted">${fmt(q[0] * q[1])} USD</td></tr>`).join("");
+    const mid = t.quotes.bids[0] && t.quotes.asks[0] ? (t.quotes.bids[0][0] + t.quotes.asks[0][0]) / 2 : null;
+    const spr = mid ? ((t.quotes.asks[0][0] - t.quotes.bids[0][0]) / mid) * 1e4 : null;
+    qhtml.push(`<div class="sub"><b>${esc(t.market)}</b> · ${t.dry ? "thử" : "đã gửi"} lúc ${hhmmss(t.t)} (${dur((d.generatedAt - t.t) / 1000)} trước) · khoảng cách bid/ask ${fmt(spr, 2)} bps</div>
+      <table><tr><th></th><th class="r">Giá</th><th class="r">Khối lượng</th><th class="r">Giá trị</th></tr>${asks}${bids}</table>`);
+  }
+  $("quotes").innerHTML = qhtml.join("") || '<div class="muted">Chưa có lần đặt lệnh nào trong phiên này.</div>';
+
+  // Fills
+  $("fills").innerHTML = '<tr><th>Giờ</th><th>Thị trường</th><th>Phía</th><th class="r">Giá</th><th class="r">KL</th><th class="r">USD</th><th>Loại</th><th class="r">Phí</th></tr>' +
+    (d.fills.recent.map((f) => `<tr><td>${hhmmss(f.t)}</td><td>${esc(f.market)}</td><td class="${f.side === "buy" ? "good" : "bad"}">${f.side === "buy" ? "mua" : "bán"}</td><td class="r">${fmt(f.px)}</td><td class="r">${fmt(f.sz, 4)}</td><td class="r">${fmt(f.usd)}</td><td><span class="tag ${f.maker ? "t-maker" : "t-taker"}">${f.maker ? "maker" : "taker"}</span></td><td class="r">${fmt(f.fee, 4)}</td></tr>`).join("") ||
+    '<tr><td colspan="8" class="muted">Chưa có lệnh khớp.</td></tr>');
+
+  // Transactions
+  const net = r.network === "testnet" ? "testnet" : "mainnet";
+  $("txs").innerHTML = `<tr><th>Giờ</th><th>Thị trường</th><th>Chế độ</th><th class="r">Gas</th><th>Tx</th></tr>` +
+    (d.ladders.recent.map((t) => `<tr><td>${hhmmss(t.t)}</td><td>${esc(t.market)}</td><td>${t.dry ? "thử" : "thật" + (t.path ? " (" + esc(t.path) + ")" : "")}</td><td class="r">${isNum(t.gasUsed) ? t.gasUsed : "–"}</td><td class="mono">${t.hash ? `<a target="_blank" rel="noopener noreferrer" href="https://explorer.aptoslabs.com/txn/${encodeURIComponent(t.hash)}?network=${net}">${esc(t.hash.slice(0, 10))}…</a>` : "–"}</td></tr>`).join("") ||
+    '<tr><td colspan="5" class="muted">Chưa có giao dịch.</td></tr>') +
+    `<tr><td colspan="5" class="sub">Tổng: ${d.ladders.placed} đã gửi · ${d.ladders.dry} thử · ${d.ladders.failed} lỗi${isNum(d.ladders.perHour) ? " · " + fmt(d.ladders.perHour, 1) + " lần/giờ" : ""}</td></tr>`;
+
+  // Events
+  $("events").innerHTML = '<tr><th>Giờ</th><th>Mức</th><th>Nội dung</th></tr>' +
+    (d.events.map((v) => `<tr><td>${hhmmss(v.t)}</td><td><span class="tag t-${esc(v.level)}">${esc(v.level)}</span></td><td>${esc(v.msg)} <span class="detail mono">${esc(v.detail)}</span></td></tr>`).join("") ||
+    '<tr><td colspan="3" class="muted">Không có sự kiện nào đáng chú ý.</td></tr>');
+
+  $("foot").textContent = `${d.logLines} dòng log · tự làm mới mỗi 5 giây · chỉ đọc, không điều khiển bot (dừng bot: Ctrl+C hoặc tạo file state/KILL)`;
+
+  chart("c-equity", d.series.t, d.series.equity, { color: "--accent", base: isNum(e.equityStart) ? e.equityStart : null, dec: 3 });
+  chart("c-pos", d.series.t, d.series.positionUsd, { color: "--warn", base: 0, dec: 2 });
+  chart("c-vol", d.volumeSeries.t, d.volumeSeries.cumUsd, { color: "--good", step: true, dec: 0, min0: true });
+  chart("c-apt", d.series.t, d.series.aptBalance, { color: "--info", base: isNum(lim.minGasBalanceApt) ? lim.minGasBalanceApt : null, dec: 4 });
+}
+
+function chart(id, xs, ys, o) {
+  const cv = $(id), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext("2d");
+  g.scale(dpr, dpr);
+  const css = (n) => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+  const ink = css("--muted"), line = css("--line"), col = css(o.color);
+  g.clearRect(0, 0, W, H);
+  g.font = "11px system-ui, sans-serif";
+  const pts = [];
+  for (let i = 0; i < xs.length; i++) if (isNum(ys[i])) pts.push([xs[i], ys[i]]);
+  if (pts.length < 2) { g.fillStyle = ink; g.fillText("chưa đủ dữ liệu", 10, 20); return; }
+  let lo = Math.min(...pts.map((p) => p[1])), hi = Math.max(...pts.map((p) => p[1]));
+  if (isNum(o.base)) { lo = Math.min(lo, o.base); hi = Math.max(hi, o.base); }
+  if (o.min0) lo = Math.min(lo, 0);
+  if (hi - lo < 1e-9) { hi += 0.5; lo -= 0.5; }
+  const pad = (hi - lo) * 0.08; lo = o.min0 ? 0 : lo - pad; hi += pad;
+  const x0 = 54, x1 = W - 8, y0 = 8, y1 = H - 20;
+  const t0 = pts[0][0], t1 = pts[pts.length - 1][0] || t0 + 1;
+  const X = (t) => x0 + ((t - t0) / Math.max(1, t1 - t0)) * (x1 - x0);
+  const Y = (v) => y1 - ((v - lo) / (hi - lo)) * (y1 - y0);
+  g.strokeStyle = line; g.fillStyle = ink; g.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const v = lo + ((hi - lo) * i) / 3, y = Y(v);
+    g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+    g.fillText(fmt(v, o.dec), 4, y + 4);
+  }
+  g.fillText(hhmmss(t0), x0, H - 5);
+  const lab = hhmmss(t1); g.fillText(lab, x1 - g.measureText(lab).width, H - 5);
+  if (isNum(o.base)) {
+    g.setLineDash([4, 4]); g.strokeStyle = ink;
+    g.beginPath(); g.moveTo(x0, Y(o.base)); g.lineTo(x1, Y(o.base)); g.stroke(); g.setLineDash([]);
+  }
+  g.strokeStyle = col; g.lineWidth = 2; g.beginPath();
+  pts.forEach((p, i) => {
+    if (i === 0) g.moveTo(X(p[0]), Y(p[1]));
+    else { if (o.step) g.lineTo(X(p[0]), Y(pts[i - 1][1])); g.lineTo(X(p[0]), Y(p[1])); }
+  });
+  g.stroke();
+  const lp = pts[pts.length - 1];
+  g.fillStyle = col; g.beginPath(); g.arc(X(lp[0]), Y(lp[1]), 3, 0, 7); g.fill();
+  const txt = fmt(lp[1], o.dec); g.fillText(txt, Math.min(X(lp[0]) + 6, x1 - g.measureText(txt).width), Math.max(12, Y(lp[1]) - 8));
+}
+
+let busy = false;
+async function refresh() {
+  if (busy) return;
+  busy = true;
+  try {
+    const res = await fetch("/api/data?apt=" + encodeURIComponent($("apt").value || "0.8"), { cache: "no-store" });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    render(await res.json());
+  } catch (err) {
+    $("alerts").innerHTML = `<div class="alert error">Không lấy được dữ liệu từ dashboard server: ${esc(err.message || err)}. Kiểm tra tiến trình dashboard và đường hầm SSH.</div>`;
+  } finally {
+    busy = false;
+  }
+}
+refresh();
+setInterval(() => { if (!document.hidden) refresh(); }, 5000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
+window.addEventListener("resize", () => { if (!document.hidden) refresh(); });
+</script>
+</body>
+</html>

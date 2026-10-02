@@ -9,7 +9,8 @@
     "test": "vitest run",
     "paper": "tsx src/cli.ts paper",
     "check": "tsx src/cli.ts check",
-    "live": "tsx src/cli.ts live"
+    "live": "tsx src/cli.ts live",
+    "dashboard": "tsx src/cli.ts dashboard"
   },
   "dependencies": {
     "@aptos-labs/ts-sdk": "^7.1.0",

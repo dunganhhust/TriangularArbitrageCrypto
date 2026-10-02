@@ -21,8 +21,23 @@ import type { Ladder, MarketSpec } from "./types.js";
 
 export type Logger = (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
 
+let runLogFile: string | null = null;
+
+/** Also append every log line to this file (the dashboard reads it). null/empty = stdout only. */
+export function setRunLogFile(path: string | null): void {
+  runLogFile = path || null;
+  if (runLogFile) mkdirSync(dirname(runLogFile), { recursive: true });
+}
+
 export const jsonLogger: Logger = (level, msg, extra) => {
-  console.log(JSON.stringify({ t: new Date().toISOString(), level, msg, ...extra }));
+  const line = JSON.stringify({ t: new Date().toISOString(), level, msg, ...extra });
+  console.log(line);
+  if (!runLogFile) return;
+  try {
+    appendFileSync(runLogFile, line + "\n");
+  } catch {
+    // Logging must never be able to stop the bot.
+  }
 };
 
 interface MarketState {
@@ -399,8 +414,15 @@ export class MarketMaker {
         [...this.states.keys()].map((n) => [n, round(this.ex.getPosition(n), 6)]),
       );
       const fuses = Object.fromEntries([...this.states.entries()].map(([n, st]) => [n, st.fuse.tripsInLastHour]));
+      const mids = Object.fromEntries([...this.states.keys()].map((n) => [n, round(this.lastMid.get(n) ?? NaN, 4)]));
+      const positionsUsd = Object.fromEntries(
+        [...this.states.keys()].map((n) => [n, round(this.ex.getPosition(n) * (this.lastMid.get(n) ?? NaN), 2)]),
+      );
+      const quoting = Object.fromEntries([...this.states.entries()].map(([n, st]) => [n, st.live !== null]));
+      const paused = Object.fromEntries([...this.states.entries()].map(([n, st]) => [n, st.lastPause]));
       this.log("info", "status", {
         equity: round(this.ex.getAccount()?.equityUsd ?? NaN, 2),
+        startEquity: round(this.startEquity ?? NaN, 2),
         dayVolumeUsd: Math.round(s.dayVolumeUsd),
         makerShare: s.dayVolumeUsd > 0 ? round(s.dayMakerVolumeUsd / s.dayVolumeUsd, 3) : null,
         pnlBps: round(s.ewmaPnlBps, 3),
@@ -415,7 +437,12 @@ export class MarketMaker {
         rebateEligible: s.cycleMakerRatio === null || s.cycleMakerRatio >= this.cfg.rebate.minMakerRatio,
         projectedRebateUsd: round((s.cycleMakerVolumeUsd * this.cfg.rebate.bps) / 1e4, 4),
         fuseTripsLastHour: fuses,
+        fuseTrips: this.tripCount,
         positions,
+        positionsUsd,
+        mids,
+        quoting,
+        paused,
         ...(gasNow ? { txCount: gasNow.txCount, gasApt: round(gasNow.gasApt, 6), signerAptBalance: gasNow.balanceApt === null ? null : round(gasNow.balanceApt, 4) } : {}),
       });
     }

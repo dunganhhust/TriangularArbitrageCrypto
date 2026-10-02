@@ -497,7 +497,7 @@ export class DecibelExchange implements Exchange {
     const chain = this.toChain(market, ladder);
     const sequenceNumber = this.nextSeq(market);
     if (this.o.dryRun) {
-      this.log("DRY-RUN place_bulk_orders", { market, sequenceNumber, ...chain });
+      this.log("DRY-RUN place_bulk_orders", { market, sequenceNumber, ...chain, quotes: humanQuotes(ladder) });
       return true;
     }
     try {
@@ -505,7 +505,7 @@ export class DecibelExchange implements Exchange {
       const r = tx as { success?: boolean; vm_status?: string; hash?: string; gas_used?: string };
       const ok = r.success !== false;
       if (!ok) this.log("bulk order tx failed", { market, vm: r.vm_status });
-      else this.log("ladder placed", { market, sequenceNumber, hash: r.hash, gasUsed: r.gas_used, path: this.write.lastPath, bids: ladder.bids.length, asks: ladder.asks.length });
+      else this.log("ladder placed", { market, sequenceNumber, hash: r.hash, gasUsed: r.gas_used, path: this.write.lastPath, bids: ladder.bids.length, asks: ladder.asks.length, quotes: humanQuotes(ladder) });
       return ok;
     } catch (e) {
       this.log("bulk order tx error", { market, error: String(e) });
@@ -805,4 +805,12 @@ function randomNonce(): bigint {
   let n = 0n;
   while (n === 0n) n = BigInt(`0x${randomBytes(8).toString("hex")}`);
   return n;
+}
+
+/** Ladder prices and sizes in human units, for the log and the dashboard. */
+function humanQuotes(ladder: Ladder): { bids: [number, number][]; asks: [number, number][] } {
+  return {
+    bids: ladder.bids.map((q) => [q.price, q.size]),
+    asks: ladder.asks.map((q) => [q.price, q.size]),
+  };
 }

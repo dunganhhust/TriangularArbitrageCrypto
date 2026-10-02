@@ -45,6 +45,8 @@ export const configSchema = z.object({
       stateFile: z.string().default("state/state.json"),
       killSwitchFile: z.string().default("state/KILL"),
       pointsLogFile: z.string().default("data/points_log.csv"),
+      /** Every log line of a live run is also appended here; the dashboard reads it. "" = off. */
+      runLogFile: z.string().default("data/run.log"),
       statusEveryMs: z.number().int().positive().default(30_000),
       pointsPollEveryMs: z.number().int().positive().default(300_000),
     })

@@ -1,14 +1,16 @@
 import { existsSync } from "node:fs";
 import { loadConfig, loadLiveEnv } from "./config.js";
 import type { Config } from "./config.js";
-import { MarketMaker, jsonLogger } from "./engine.js";
+import { startDashboard } from "./dashboard/server.js";
+import { MarketMaker, jsonLogger, setRunLogFile } from "./engine.js";
 import { DecibelExchange } from "./exchange/decibel.js";
 import { PaperExchange } from "./exchange/paper.js";
 
 const USAGE = `usage:
   tsx src/cli.ts paper [config.json] [--hours N]     simulated venue, no network
   tsx src/cli.ts check [config.json]                 read-only: connect, print markets/units/points
-  tsx src/cli.ts live  [config.json] [--dry-run]     trade (env: APTOS_NODE_API_KEY MM_PRIVATE_KEY MM_SUBACCOUNT MM_OWNER)`;
+  tsx src/cli.ts live  [config.json] [--dry-run]     trade (env: APTOS_NODE_API_KEY MM_PRIVATE_KEY MM_SUBACCOUNT MM_OWNER)
+  tsx src/cli.ts dashboard [config.json] [--port N]  read-only web page on 127.0.0.1 (default 8787) showing the live run`;
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -18,7 +20,7 @@ function arg(name: string): string | undefined {
 async function main(): Promise<void> {
   const [cmd, maybePath] = process.argv.slice(2);
   const path = maybePath && !maybePath.startsWith("--") ? maybePath : "config.json";
-  if (!cmd || !["paper", "check", "live"].includes(cmd)) {
+  if (!cmd || !["paper", "check", "live", "dashboard"].includes(cmd)) {
     console.log(USAGE);
     process.exit(1);
   }
@@ -28,6 +30,8 @@ async function main(): Promise<void> {
   }
   const cfg = loadConfig(path);
   if (cmd === "paper") return runPaper(cfg, Number(arg("--hours") ?? 6));
+  if (cmd === "dashboard") return runDashboard(cfg);
+  if (cmd === "live") setRunLogFile(cfg.engine.runLogFile);
   const env = loadLiveEnv();
   const ex = new DecibelExchange({
     network: cfg.network,
@@ -44,7 +48,22 @@ async function main(): Promise<void> {
     await ex.close();
     process.exit(0);
   }
-  return runLive(cfg, ex);
+  return runLive(cfg, ex, process.argv.includes("--dry-run"));
+}
+
+/** Read-only page over data/run.log. Needs no keys; bound to loopback only (use an SSH tunnel to see it remotely). */
+async function runDashboard(cfg: Config): Promise<void> {
+  const port = Number(arg("--port") ?? 8787);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    console.error(`invalid --port ${arg("--port")}`);
+    process.exit(1);
+  }
+  if (!cfg.engine.runLogFile) {
+    console.error("engine.runLogFile is empty: the bot writes no run log, so there is nothing to show");
+    process.exit(1);
+  }
+  await startDashboard({ port, logFile: cfg.engine.runLogFile, killFile: cfg.engine.killSwitchFile });
+  console.log(`dashboard: http://localhost:${port}  (reads ${cfg.engine.runLogFile}; Ctrl+C to stop)`);
 }
 
 /** Fast-forward simulation: one engine step per `tickMs` of simulated time. */
@@ -98,7 +117,24 @@ async function runPaper(cfg: Config, hours: number): Promise<void> {
   );
 }
 
-async function runLive(cfg: Config, ex: DecibelExchange): Promise<void> {
+async function runLive(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promise<void> {
+  // First line of the run: the dashboard treats everything after the latest such line as the current run.
+  jsonLogger("info", "market maker started", {
+    markets: cfg.markets.map((m) => m.name),
+    network: cfg.network,
+    dryRun,
+    pid: process.pid,
+    marketCfg: cfg.markets.map((m) => ({ name: m.name, maxPositionUsd: m.maxPositionUsd, levelSizeUsd: m.levelSizeUsd, levels: m.levels })),
+    limits: {
+      maxDrawdownUsd: cfg.risk.maxDrawdownUsd,
+      minGasBalanceApt: cfg.risk.minGasBalanceApt,
+      maxGasAptPerDay: cfg.risk.maxGasAptPerDay,
+      rebateBps: cfg.rebate.bps,
+      minMakerRatio: cfg.rebate.minMakerRatio,
+      minReplaceIntervalMs: cfg.engine.minReplaceIntervalMs,
+      rampStages: cfg.ramp.enabled ? cfg.ramp.stages : null,
+    },
+  });
   const specs = await ex.init(cfg.markets.map((m) => m.name));
   const mm = new MarketMaker(cfg, ex, specs, {
     persist: true,
@@ -116,7 +152,6 @@ async function runLive(cfg: Config, ex: DecibelExchange): Promise<void> {
   process.on("SIGINT", () => void stop("SIGINT"));
   process.on("SIGTERM", () => void stop("SIGTERM"));
 
-  jsonLogger("info", "market maker started", { markets: cfg.markets.map((m) => m.name), network: cfg.network });
   for (;;) {
     const started = Date.now();
     try {

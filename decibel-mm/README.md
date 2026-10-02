@@ -56,8 +56,30 @@ npx tsx src/cli.ts live config.json --dry-run   # real data, transactions are on
 npx tsx src/cli.ts live config.json             # trades
 ```
 
-Set `"network": "testnet"` first. Stop with Ctrl-C (cancels quotes) or `touch state/KILL`
+Set `"network": "testnet"` first. Stop with Ctrl-C or SIGTERM (cancels quotes) or `touch state/KILL`
 (halts and cancels).
+
+## Dashboard (read-only, localhost)
+
+Every `live` run also appends its JSON log lines to `engine.runLogFile` (default `data/run.log`). The
+dashboard turns that file into a web page that refreshes every 5 s:
+
+```bash
+npm run dashboard                         # or: node --import tsx src/cli.ts dashboard config.json --port 8787
+# open http://localhost:8787
+```
+
+It shows the run state (running / stale / stopped / halted, dry-run or live), equity and drawdown against the
+stop limit, position, volume and maker share, the half-month rebate ratio against the 80 % line, fills,
+the quotes last sent, gas and APT runway, fuse/ramp state, an economics table (fees, projected rebate, gas
+in USD at an APT price you type in, estimated net) and charts. A banner appears when the log goes quiet
+(the process may have died while orders are still on-chain), when taker fills pull the ratio down, when
+the signer is low on APT, or when a fuse is open.
+
+It has no login and cannot control the bot, so it only listens on `127.0.0.1`. To see a VM's dashboard from
+your own machine, tunnel the port: `gcloud compute ssh <vm> --zone <zone> -- -L 8787:localhost:8787`, then
+open `http://localhost:8787` (in Cloud Shell use `-L 8080:localhost:8787` and the Web Preview on port 8080).
+Only the latest run (everything after the last `market maker started` line) is shown.
 
 ## Config (config.json)
 
@@ -153,4 +175,5 @@ src/strategy/risk.ts     pure risk decisions
 src/engine.ts            control loop (injected clock, exchange-agnostic)
 src/exchange/decibel.ts  live adapter (SDK reads + WS, bulk-order writes, Amps telemetry)
 src/exchange/paper.ts    simulator for dry runs and tests
+src/dashboard/           read-only localhost page over data/run.log (analyze.ts, server.ts, index.html)
 ```
