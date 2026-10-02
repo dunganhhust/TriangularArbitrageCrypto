@@ -1,15 +1,23 @@
-# TriangularArbitrageCryptos
+# Decibel Market Maker
 
-Triangular arbitrage is a technique that tries to exploit the price discrepancy across three different assets at the same time.  
-For example, we can exchange BTC for USDT, BTC for ETH and ETH back to USDT.   
-If the net worth in doing these three trades simultaneously is profitable then the 3 trades are executed simultaneously.  
+Points- and rebate-aware market maker for [Decibel](https://decibel.trade) perpetuals on Aptos.
 
-Here we implement the triangular arbitrage in 4 steps.  
-Step 1: Get all the valid crypto combinations. 
-Step 2: Perform triangular arbitrage  
-Step 3: Place the trade orders  
-Step 4: Bundle it together  
+The project lives in [`decibel-mm/`](decibel-mm/README.md):
 
-Refer to this blog to understand more on triangular arbitrage implemented in this repo:  
-https://lakshmi1212.medium.com/automated-triangular-arbitrage-of-cryptos-in-4-steps-a678f7b01ce7
+- multi-level maker ladder via Decibel's on-chain bulk order (one transaction per refresh)
+- inventory skew, one-sided quoting at the position limit, no self-crossing
+- cost-budget controller that buys maker volume (Amps, streaks, maker campaigns) only while measured cost stays within budget
+- risk controls: stale/crossed book, oracle divergence, emergency reduce, drawdown halt, kill file
+- paper-trading simulator and a research log of Amps vs volume
+- research notes in [`decibel-mm/docs/RESEARCH.md`](decibel-mm/docs/RESEARCH.md)
 
+Quick start:
+
+```bash
+cd decibel-mm
+npm install
+cp config.example.json config.json
+npm test && npm run paper
+```
+
+The live adapter has not been run against the network yet; follow the testnet checklist in `decibel-mm/README.md` before trading real funds.

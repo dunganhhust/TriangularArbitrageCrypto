@@ -1,0 +1,23 @@
+{
+  "network": "testnet",
+  "markets": [
+    {
+      "name": "BTC-USD",
+      "maxPositionUsd": 500,
+      "levelSizeUsd": 100,
+      "levels": 3,
+      "baseHalfSpreadBps": 2,
+      "levelStepBps": 1.5,
+      "inventorySkewBps": 6,
+      "minHalfSpreadBps": 0.6
+    }
+  ],
+  "points": {
+    "costBudgetBps": 0.5,
+    "dailyVolumeTargetUsd": 100000,
+    "streakMinVolumeUsd": 10000
+  },
+  "risk": {
+    "maxDrawdownUsd": 50
+  }
+}
