@@ -1,8 +1,9 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Config, MarketConfig } from "./config.js";
 import type { Exchange } from "./exchange/exchange.js";
 import { VolatilityFuse } from "./strategy/fuse.js";
+import type { FuseStatus } from "./strategy/fuse.js";
 import { PointsController } from "./strategy/points.js";
 import { RampController } from "./strategy/ramp.js";
 import {
@@ -53,6 +54,8 @@ interface MarketState {
   cooldownUntil: number;
   lastPause: string | null;
   fuse: VolatilityFuse;
+  /** Most recent fuse verdict, for the live snapshot. */
+  fuseStatus: FuseStatus;
   warnedTooSmall: boolean;
 }
 
@@ -77,6 +80,8 @@ export class MarketMaker {
   private readonly rng: () => number;
   private startEquity: number | null = null;
   private lastStatus = 0;
+  private lastLive = 0;
+  private liveWarned = false;
   private lastPointsPoll = 0;
   private lastSave = 0;
   private halted = false;
@@ -125,6 +130,7 @@ export class MarketMaker {
         cooldownUntil: 0,
         lastPause: null,
         fuse: new VolatilityFuse(cfg.fuse),
+        fuseStatus: { state: "ok" },
         warnedTooSmall: false,
       });
     }
@@ -165,7 +171,10 @@ export class MarketMaker {
       await this.haltAll();
       return;
     }
-    if (gas && (await this.gasBudgetExceeded(now, gas.gasApt))) return;
+    if (gas && (await this.gasBudgetExceeded(now, gas.gasApt))) {
+      await this.housekeeping(now); // keep the status line and live snapshot flowing while quotes are pulled
+      return;
+    }
 
     const ramp = this.ramp.update(now, acct?.equityUsd ?? null, { fills: this.fillCount, trips: this.tripCount });
     if (ramp.kind === "advanced") this.log("info", "ramp: stage up", { from: ramp.from, to: ramp.to, sizeMult: this.ramp.mult });
@@ -221,6 +230,7 @@ export class MarketMaker {
     this.points.resetToxicity();
     for (const st of this.states.values()) {
       const s = st.fuse.trip(now, `toxic flow: last ${f.toxicFills} fills averaged ${round(avg, 1)} bps`);
+      st.fuseStatus = s;
       if (s.state === "halt") {
         this.log("error", "HALT", { market: st.spec.name, reason: s.reason });
         await this.haltAll();
@@ -255,6 +265,7 @@ export class MarketMaker {
       spreadBps: mid !== null && bb !== undefined && ba !== undefined ? ((ba - bb) / mid) * 1e4 : null,
       oracleDevBps: mid !== null && price && price.oracle > 0 ? (Math.abs(mid - price.oracle) / price.oracle) * 1e4 : null,
     });
+    st.fuseStatus = fz;
     if (fz.state === "halt") {
       this.log("error", "HALT", { market: name, reason: fz.reason });
       await this.haltAll();
@@ -408,43 +419,11 @@ export class MarketMaker {
     const e = this.cfg.engine;
     if (now - this.lastStatus >= e.statusEveryMs) {
       this.lastStatus = now;
-      const s = this.points.stats(now);
-      const gasNow = this.ex.getGas?.() ?? null;
-      const positions = Object.fromEntries(
-        [...this.states.keys()].map((n) => [n, round(this.ex.getPosition(n), 6)]),
-      );
-      const fuses = Object.fromEntries([...this.states.entries()].map(([n, st]) => [n, st.fuse.tripsInLastHour]));
-      const mids = Object.fromEntries([...this.states.keys()].map((n) => [n, round(this.lastMid.get(n) ?? NaN, 4)]));
-      const positionsUsd = Object.fromEntries(
-        [...this.states.keys()].map((n) => [n, round(this.ex.getPosition(n) * (this.lastMid.get(n) ?? NaN), 2)]),
-      );
-      const quoting = Object.fromEntries([...this.states.entries()].map(([n, st]) => [n, st.live !== null]));
-      const paused = Object.fromEntries([...this.states.entries()].map(([n, st]) => [n, st.lastPause]));
-      this.log("info", "status", {
-        equity: round(this.ex.getAccount()?.equityUsd ?? NaN, 2),
-        startEquity: round(this.startEquity ?? NaN, 2),
-        dayVolumeUsd: Math.round(s.dayVolumeUsd),
-        makerShare: s.dayVolumeUsd > 0 ? round(s.dayMakerVolumeUsd / s.dayVolumeUsd, 3) : null,
-        pnlBps: round(s.ewmaPnlBps, 3),
-        spreadMult: round(s.spreadMult, 3),
-        volumeFrac: round(s.volumeFrac, 3),
-        streakSecured: s.streakSecured,
-        rampStage: this.ramp.stage,
-        sizeMult: this.ramp.mult,
-        takerFills: this.takerFills,
-        cycle: s.cycleKey,
-        cycleMakerRatio: s.cycleMakerRatio === null ? null : round(s.cycleMakerRatio, 3),
-        rebateEligible: s.cycleMakerRatio === null || s.cycleMakerRatio >= this.cfg.rebate.minMakerRatio,
-        projectedRebateUsd: round((s.cycleMakerVolumeUsd * this.cfg.rebate.bps) / 1e4, 4),
-        fuseTripsLastHour: fuses,
-        fuseTrips: this.tripCount,
-        positions,
-        positionsUsd,
-        mids,
-        quoting,
-        paused,
-        ...(gasNow ? { txCount: gasNow.txCount, gasApt: round(gasNow.gasApt, 6), signerAptBalance: gasNow.balanceApt === null ? null : round(gasNow.balanceApt, 4) } : {}),
-      });
+      this.log("info", "status", this.statusFields(now));
+    }
+    if (this.opts.persist && e.liveFile && now - this.lastLive >= e.liveEveryMs) {
+      this.lastLive = now;
+      this.writeLive(now);
     }
     if (this.ex.getPoints && now - this.lastPointsPoll >= e.pointsPollEveryMs) {
       this.lastPointsPoll = now;
@@ -453,6 +432,91 @@ export class MarketMaker {
     if (this.opts.persist && now - this.lastSave >= 15_000) {
       this.lastSave = now;
       this.save(now);
+    }
+  }
+
+  /** The numbers behind every `status` log line (and the live snapshot). */
+  private statusFields(now: number): Record<string, unknown> {
+    const s = this.points.stats(now);
+    const gasNow = this.ex.getGas?.() ?? null;
+    const names = [...this.states.keys()];
+    const positions = Object.fromEntries(names.map((n) => [n, round(this.ex.getPosition(n), 6)]));
+    const fuses = Object.fromEntries([...this.states.entries()].map(([n, st]) => [n, st.fuse.tripsInLastHour]));
+    const mids = Object.fromEntries(names.map((n) => [n, round(this.lastMid.get(n) ?? NaN, 4)]));
+    const positionsUsd = Object.fromEntries(
+      names.map((n) => [n, round(this.ex.getPosition(n) * (this.lastMid.get(n) ?? NaN), 2)]),
+    );
+    const quoting = Object.fromEntries([...this.states.entries()].map(([n, st]) => [n, st.live !== null]));
+    const paused = Object.fromEntries([...this.states.entries()].map(([n, st]) => [n, st.lastPause]));
+    return {
+      equity: round(this.ex.getAccount()?.equityUsd ?? NaN, 2),
+      startEquity: round(this.startEquity ?? NaN, 2),
+      dayVolumeUsd: Math.round(s.dayVolumeUsd),
+      makerShare: s.dayVolumeUsd > 0 ? round(s.dayMakerVolumeUsd / s.dayVolumeUsd, 3) : null,
+      pnlBps: round(s.ewmaPnlBps, 3),
+      spreadMult: round(s.spreadMult, 3),
+      volumeFrac: round(s.volumeFrac, 3),
+      streakSecured: s.streakSecured,
+      rampStage: this.ramp.stage,
+      sizeMult: this.ramp.mult,
+      takerFills: this.takerFills,
+      cycle: s.cycleKey,
+      cycleMakerRatio: s.cycleMakerRatio === null ? null : round(s.cycleMakerRatio, 3),
+      rebateEligible: s.cycleMakerRatio === null || s.cycleMakerRatio >= this.cfg.rebate.minMakerRatio,
+      projectedRebateUsd: round((s.cycleMakerVolumeUsd * this.cfg.rebate.bps) / 1e4, 4),
+      fuseTripsLastHour: fuses,
+      fuseTrips: this.tripCount,
+      positions,
+      positionsUsd,
+      mids,
+      quoting,
+      paused,
+      ...(gasNow ? { txCount: gasNow.txCount, gasApt: round(gasNow.gasApt, 6), signerAptBalance: gasNow.balanceApt === null ? null : round(gasNow.balanceApt, 4) } : {}),
+    };
+  }
+
+  /** Per-market view for the dashboard: top of book, position, resting quotes, fuse. */
+  private marketViews(): Record<string, unknown> {
+    const out: Record<string, unknown> = {};
+    for (const [name, st] of this.states) {
+      const book = this.ex.getBook(name);
+      const bid = book?.bids[0]?.price ?? null;
+      const ask = book?.asks[0]?.price ?? null;
+      const mid = this.lastMid.get(name) ?? null;
+      const pos = this.ex.getPosition(name);
+      const f = st.fuseStatus;
+      out[name] = {
+        mid: mid === null ? null : round(mid, 4),
+        bid,
+        ask,
+        spreadBps: bid !== null && ask !== null && bid > 0 ? round(((ask - bid) / ((ask + bid) / 2)) * 1e4, 3) : null,
+        position: round(pos, 6),
+        positionUsd: mid === null ? null : round(pos * mid, 2),
+        quoting: st.live !== null,
+        paused: st.lastPause,
+        fuse: f.state,
+        fuseUntil: f.state === "tripped" ? f.until : null,
+        fuseReason: f.state === "tripped" || f.state === "halt" ? f.reason : null,
+        quotes: st.live ? { bids: st.live.bids.map((q) => [q.price, q.size]), asks: st.live.asks.map((q) => [q.price, q.size]) } : null,
+        lastReplaceAt: st.lastReplaceAt || null,
+      };
+    }
+    return out;
+  }
+
+  /** Latest snapshot for the dashboard, replaced atomically so a reader never sees half a file. */
+  private writeLive(now: number): void {
+    const file = this.cfg.engine.liveFile;
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      const tmp = `${file}.tmp`;
+      writeFileSync(tmp, JSON.stringify({ t: new Date().toISOString(), now, pid: process.pid, ...this.statusFields(now), markets: this.marketViews() }));
+      renameSync(tmp, file);
+    } catch (err) {
+      if (!this.liveWarned) {
+        this.liveWarned = true;
+        this.log("warn", "live snapshot write failed (dashboard falls back to the log)", { error: String(err) });
+      }
     }
   }
 

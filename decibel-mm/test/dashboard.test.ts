@@ -1,10 +1,11 @@
-import { appendFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { analyze, lastRun, parseLog } from "../src/dashboard/analyze.js";
-import { readTail, startDashboard } from "../src/dashboard/server.js";
+import { startDashboard } from "../src/dashboard/server.js";
+import { LogTail } from "../src/dashboard/tail.js";
 import { setRunLogFile, jsonLogger } from "../src/engine.js";
 
 const T0 = Date.parse("2026-10-02T10:00:00Z");
@@ -160,7 +161,7 @@ describe("dashboard server", () => {
     dirs.push(dir);
     const logFile = join(dir, "run.log");
     writeFileSync(logFile, [START, status(30_000)].join("\n") + "\n");
-    const srv = await startDashboard({ port: 0, logFile, killFile: join(dir, "KILL"), staleMs: 1e12 });
+    const srv = await startDashboard({ port: 0, logFile, killFile: join(dir, "KILL"), staleMs: 1e12, priceFeed: null });
     servers.push(srv);
     const addr = srv.address() as AddressInfo;
     expect(addr.address).toBe("127.0.0.1");
@@ -185,23 +186,23 @@ describe("dashboard server", () => {
   it("answers with an empty state when no log exists yet", async () => {
     const dir = mkdtempSync(join(tmpdir(), "mm-dash-"));
     dirs.push(dir);
-    const srv = await startDashboard({ port: 0, logFile: join(dir, "missing.log"), killFile: join(dir, "KILL") });
+    const srv = await startDashboard({ port: 0, logFile: join(dir, "missing.log"), killFile: join(dir, "KILL"), priceFeed: null });
     servers.push(srv);
     const base = `http://127.0.0.1:${(srv.address() as AddressInfo).port}`;
     const data = (await (await fetch(base + "/api/data")).json()) as ReturnType<typeof analyze>;
     expect(data.run.state).toBe("no-data");
   });
 
-  it("reads only the tail of a large file, from a line boundary", () => {
+  it("reads only the tail of a large file on first load, from a line boundary", () => {
     const dir = mkdtempSync(join(tmpdir(), "mm-dash-"));
     dirs.push(dir);
     const f = join(dir, "big.log");
-    const rows = Array.from({ length: 200 }, (_, i) => JSON.stringify({ i, pad: "x".repeat(40) }));
+    const rows = Array.from({ length: 200 }, (_, i) => line(i * 1000, "info", "tick", { i, pad: "x".repeat(40) }));
     writeFileSync(f, rows.join("\n") + "\n");
-    const text = readTail(f, 1000);
-    const parsed = text.split("\n").filter(Boolean).map((l) => JSON.parse(l) as { i: number });
-    expect(parsed[parsed.length - 1]!.i).toBe(199);
-    expect(parsed.length).toBeLessThan(200);
+    const lines = new LogTail(f, 2000).read();
+    expect(lines[lines.length - 1]!.i).toBe(199);
+    expect(lines.length).toBeLessThan(200);
+    expect(lines.length).toBeGreaterThan(5);
   });
 
   it("the bot's logger mirrors every line into the run log", () => {
@@ -216,7 +217,7 @@ describe("dashboard server", () => {
     } finally {
       console.log = orig;
     }
-    const lines = parseLog(readTail(f, 10_000));
+    const lines = parseLog(readFileSync(f, "utf8"));
     expect(lines).toHaveLength(1);
     expect(lines[0]).toMatchObject({ level: "warn", msg: "hello", a: 1 });
   });

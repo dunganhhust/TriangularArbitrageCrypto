@@ -1,52 +1,40 @@
 import { createServer } from "node:http";
 import type { Server } from "node:http";
-import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { analyze, parseLog } from "./analyze.js";
-import type { LogLine } from "./analyze.js";
+import { analyze } from "./analyze.js";
+import { PriceFeed } from "./price.js";
+import { LiveFile, LogTail } from "./tail.js";
 
 export interface DashboardOpts {
   port: number;
   /** Always bound to the loopback interface: the page has no login. Reach it through an SSH tunnel. */
   host?: string;
   logFile: string;
+  /** live.json written by the bot every second; "" = not used. */
+  liveFile?: string;
   killFile: string;
+  /** Without a live snapshot a run is "stale" after this long with no log line. */
   staleMs?: number;
-  /** Largest tail of the log that is parsed (a long run's log is much bigger than the page needs). */
+  /** How much of the log's tail is read on first load (later reads are incremental). */
   tailBytes?: number;
+  /** APT price used when neither a manual override nor the live feed is available. */
   defaultAptUsd?: number;
+  /** Live APT price source. Pass null to disable (tests); omitted = public exchange endpoints. */
+  priceFeed?: PriceFeed | null;
 }
 
 const PAGE = fileURLToPath(new URL("./index.html", import.meta.url));
 
-/** Last `maxBytes` of a file, starting at a line boundary. */
-export function readTail(file: string, maxBytes: number): string {
-  const size = statSync(file).size;
-  if (size <= maxBytes) return readFileSync(file, "utf8");
-  const fd = openSync(file, "r");
-  try {
-    const buf = Buffer.alloc(maxBytes);
-    readSync(fd, buf, 0, maxBytes, size - maxBytes);
-    const text = buf.toString("utf8");
-    const nl = text.indexOf("\n");
-    return nl >= 0 ? text.slice(nl + 1) : text;
-  } finally {
-    closeSync(fd);
-  }
-}
+/** Window lengths the page offers, in seconds; anything else is ignored. */
+const MAX_RANGE_SEC = 7 * 86_400;
 
 export function startDashboard(o: DashboardOpts): Promise<Server> {
   const staleMs = o.staleMs ?? 120_000;
-  const tail = o.tailBytes ?? 4_000_000;
-  let cache: { key: string; lines: LogLine[] } | null = null;
-
-  const load = (): LogLine[] => {
-    if (!existsSync(o.logFile)) return [];
-    const s = statSync(o.logFile);
-    const key = `${s.size}:${s.mtimeMs}`;
-    if (cache?.key !== key) cache = { key, lines: parseLog(readTail(o.logFile, tail)) };
-    return cache.lines;
-  };
+  const tail = new LogTail(o.logFile, o.tailBytes ?? 24_000_000);
+  const liveFile = new LiveFile(o.liveFile ?? "");
+  const feed = o.priceFeed === undefined ? new PriceFeed() : o.priceFeed;
+  feed?.start();
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -60,9 +48,23 @@ export function startDashboard(o: DashboardOpts): Promise<Server> {
       if (url.pathname === "/healthz") return send(200, "text/plain", "ok");
       if (url.pathname === "/favicon.ico") return send(204, "image/x-icon", "");
       if (url.pathname === "/api/data") {
-        const apt = Number(url.searchParams.get("apt"));
-        const aptUsd = Number.isFinite(apt) && apt > 0 ? apt : (o.defaultAptUsd ?? 0.8);
-        const data = analyze(load(), { now: Date.now(), staleMs, aptUsd, killFile: existsSync(o.killFile) });
+        const q = url.searchParams;
+        const manual = Number(q.get("apt"));
+        const px = feed?.get() ?? null;
+        const aptUsd = Number.isFinite(manual) && manual > 0 ? manual : px && px.ageSec <= 120 ? px.usd : (o.defaultAptUsd ?? 0.8);
+        const rangeSec = Number(q.get("range"));
+        const rangeMs = Number.isFinite(rangeSec) && rangeSec > 0 && rangeSec <= MAX_RANGE_SEC ? Math.round(rangeSec * 1000) : null;
+        const market = q.get("market") || null;
+        const data = analyze(tail.read(), {
+          now: Date.now(),
+          staleMs,
+          aptUsd,
+          killFile: existsSync(o.killFile),
+          rangeMs,
+          market,
+          live: liveFile.read(),
+        });
+        data.aptPrice = px;
         return send(200, "application/json", JSON.stringify(data));
       }
       return send(404, "text/plain", "not found");
@@ -70,6 +72,7 @@ export function startDashboard(o: DashboardOpts): Promise<Server> {
       return send(500, "application/json", JSON.stringify({ error: String(e) }));
     }
   });
+  server.on("close", () => feed?.stop());
 
   return new Promise((resolve, reject) => {
     server.once("error", reject);

@@ -61,25 +61,45 @@ Set `"network": "testnet"` first. Stop with Ctrl-C or SIGTERM (cancels quotes) o
 
 ## Dashboard (read-only, localhost)
 
-Every `live` run also appends its JSON log lines to `engine.runLogFile` (default `data/run.log`). The
-dashboard turns that file into a web page that refreshes every 5 s:
+A live run writes two files the dashboard reads:
+
+- `data/run.log` (`engine.runLogFile`): every log line, a `status` line every 30 s. History, fills, transactions, events.
+- `data/live.json` (`engine.liveFile`, `engine.liveEveryMs`, default 1000): the latest state, replaced atomically
+  every second: equity, gas, and per market the mid, best bid/ask, position, the quotes the bot has resting, and the fuse.
 
 ```bash
 npm run dashboard                         # or: node --import tsx src/cli.ts dashboard config.json --port 8787
 # open http://localhost:8787
 ```
 
-It shows the run state (running / stale / stopped / halted, dry-run or live), equity and drawdown against the
-stop limit, position, volume and maker share, the half-month rebate ratio against the 80 % line, fills,
-the quotes last sent, gas and APT runway, fuse/ramp state, an economics table (fees, projected rebate, gas
-in USD at an APT price you type in, estimated net) and charts. A banner appears when the log goes quiet
-(the process may have died while orders are still on-chain), when taker fills pull the ratio down, when
-the signer is low on APT, or when a fuse is open.
+The page polls every second. The toolbar sets a **time window** (5 min, 15 min, 1 h, 6 h, 24 h, whole run, or any number of
+minutes) and a **market** filter; both apply to the fills, transactions and events tables, the charts, the per-market
+cards and the economics table (the economics are always account-wide, the market filter does not change them). The APT
+price in the header is fetched every 2 s from public endpoints (Coinbase, then Kraken, Binance, CoinGecko; a failing source
+is skipped for 30 s) and used to turn gas into dollars; tick "giá APT tự động" off to type a price instead.
+
+It shows the run state (running / stale / stopped / halted, dry-run or live), equity and drawdown against the stop limit,
+volume and maker share, the half-month rebate ratio against the 80 % line, one card per market, gas and APT runway, fuse
+and ramp state, and alerts: a silent bot (with `live.json` that is noticed after 15 s, without it after 2 min; the process
+may have died while orders are still on-chain), taker fills, low APT, an open fuse. With an older bot that does not write
+`live.json` the page falls back to the 30 s `status` lines.
 
 It has no login and cannot control the bot, so it only listens on `127.0.0.1`. To see a VM's dashboard from
 your own machine, tunnel the port: `gcloud compute ssh <vm> --zone <zone> -- -L 8787:localhost:8787`, then
 open `http://localhost:8787` (in Cloud Shell use `-L 8080:localhost:8787` and the Web Preview on port 8080).
 Only the latest run (everything after the last `market maker started` line) is shown.
+
+## Several markets
+
+`markets` is a list; every entry is quoted by the same loop with its own ladder, position cap, fuse and ramp-scaled
+size. Account-level limits are shared: drawdown stop, gas budget, ramp stage and the toxic-flow check (poor markouts on
+recent fills trip the fuse of every market, not only the one that was hit). Two things to plan for:
+
+- **Gas scales with the number of markets**: each market's ladder replacement is its own transaction, so two markets at the
+  same refresh interval cost twice the gas. On a small account lengthen `engine.minReplaceIntervalMs`.
+- **Minimum order size**: a market whose minimum order (see `minOrderUsd` in `npm run check`) is larger than
+  `levelSizeUsd` x the current ramp multiplier will not quote at all (the bot logs `ramp stage too small` and the dashboard
+  shows "chưa báo giá"). BTC's minimum in USD is several times ETH's, so size its levels accordingly.
 
 ## Config (config.json)
 
@@ -175,5 +195,5 @@ src/strategy/risk.ts     pure risk decisions
 src/engine.ts            control loop (injected clock, exchange-agnostic)
 src/exchange/decibel.ts  live adapter (SDK reads + WS, bulk-order writes, Amps telemetry)
 src/exchange/paper.ts    simulator for dry runs and tests
-src/dashboard/           read-only localhost page over data/run.log (analyze.ts, server.ts, index.html)
+src/dashboard/           read-only localhost page over data/run.log + data/live.json (analyze.ts, tail.ts, price.ts, server.ts, index.html)
 ```

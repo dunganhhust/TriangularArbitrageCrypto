@@ -62,7 +62,7 @@ async function runDashboard(cfg: Config): Promise<void> {
     console.error("engine.runLogFile is empty: the bot writes no run log, so there is nothing to show");
     process.exit(1);
   }
-  await startDashboard({ port, logFile: cfg.engine.runLogFile, killFile: cfg.engine.killSwitchFile });
+  await startDashboard({ port, logFile: cfg.engine.runLogFile, liveFile: cfg.engine.liveFile, killFile: cfg.engine.killSwitchFile });
   console.log(`dashboard: http://localhost:${port}  (reads ${cfg.engine.runLogFile}; Ctrl+C to stop)`);
 }
 
