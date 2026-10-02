@@ -73,6 +73,9 @@ export interface PointsSnapshot {
   totalPoints?: number | null;
   /** Share of the fee-window volume that was maker (what market-maker fee tiers are judged on). */
   makerFraction?: number | null;
+  /** Maker-rebate / fee-rebate campaign rewards earned so far and ready to claim, in USD. */
+  rebateEarnedUsd?: number | null;
+  rebateReadyUsd?: number | null;
   /** Endpoints that failed (as opposed to returning empty data), for diagnostics. */
   unavailable?: string[];
 }

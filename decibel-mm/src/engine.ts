@@ -417,6 +417,8 @@ export class MarketMaker {
         ampsToday: snap.ampsToday,
         totalPoints: snap.totalPoints ?? null,
         makerFraction: snap.makerFraction ?? null,
+        rebateEarnedUsd: snap.rebateEarnedUsd ?? null,
+        rebateReadyUsd: snap.rebateReadyUsd ?? null,
         tradingAmpsToday: snap.tradingAmpsToday,
         streakAmpsToday: snap.streakAmpsToday,
         currentStreak: snap.currentStreak,
@@ -429,6 +431,7 @@ export class MarketMaker {
         volume30dUsd: snap.volume30dUsd,
       };
       this.log("info", "points", row);
+      if ((snap.rebateReadyUsd ?? 0) > 0) this.log("info", "maker rebate ready to claim: open Rewards in the app", { usd: snap.rebateReadyUsd });
       const file = this.cfg.engine.pointsLogFile;
       mkdirSync(dirname(file), { recursive: true });
       const header = Object.keys(row).join(",") + "\n";

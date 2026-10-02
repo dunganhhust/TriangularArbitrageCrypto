@@ -564,15 +564,16 @@ export class DecibelExchange implements Exchange {
       volume30dUsd: null,
       feeTier: null,
     };
-    const [daily, streak, tier, fees, total] = await Promise.allSettled([
+    const [daily, streak, tier, fees, total, camp] = await Promise.allSettled([
       this.read.tradingAmps.getDailyByOwner({ ownerAddr: owner, days: 2 }),
       this.read.streaks.getByOwner({ ownerAddr: owner }),
       this.read.tier.getByOwner({ ownerAddr: owner }),
       this.read.userFees.getByAddr({ subAddr: subaccount }),
       this.read.tradingPoints.getByOwner({ ownerAddr: owner }),
+      this.read.campaigns.getSummary({ accountAddress: owner, limit: 50, offset: 0 }),
     ]);
-    const names = ["tradingAmps", "streaks", "tier", "userFees", "tradingPoints"] as const;
-    snap.unavailable = [daily, streak, tier, fees, total]
+    const names = ["tradingAmps", "streaks", "tier", "userFees", "tradingPoints", "campaigns"] as const;
+    snap.unavailable = [daily, streak, tier, fees, total, camp]
       .map((r, i) => (r.status === "rejected" ? `${names[i]}: ${String((r.reason as Error)?.message ?? r.reason).slice(0, 120)}` : ""))
       .filter(Boolean);
     if (daily.status === "fulfilled") {
@@ -584,6 +585,12 @@ export class DecibelExchange implements Exchange {
       }
     }
     if (total.status === "fulfilled") snap.totalPoints = total.value.total_points;
+    if (camp.status === "fulfilled") {
+      // Reward amounts are raw token units; the reward asset is USDC (6 decimals).
+      const rebate = camp.value.breakdownByType.filter((b) => b.campaignType === "maker_incentive" || b.campaignType === "fee_rebate");
+      snap.rebateEarnedUsd = rebate.reduce((a, b) => a + b.lifetimeEarned, 0) / USDC_SCALE;
+      snap.rebateReadyUsd = rebate.reduce((a, b) => a + b.readyToClaim, 0) / USDC_SCALE;
+    }
     if (streak.status === "fulfilled") snap.currentStreak = streak.value.currentStreak;
     if (tier.status === "fulfilled") snap.tier = tier.value.current_tier;
     if (fees.status === "fulfilled") {
@@ -700,6 +707,19 @@ export class DecibelExchange implements Exchange {
               readyToClaim: summary.value.readyToClaim,
               totalClaimed: summary.value.totalClaimed,
               byType: summary.value.breakdownByType,
+              // Campaigns whose period has ended (maker rebates etc.) show up here, not in `active`.
+              claims: summary.value.claims.map((c) => ({
+                id: c.campaignId,
+                type: c.campaignType,
+                title: c.title,
+                status: c.status,
+                period: `${iso(c.startTsSec)} .. ${iso(c.endTsSec)}`,
+                hasAllocation: c.hasAllocation,
+                claimable: c.claimableAmount,
+                claimed: c.claimedAmount,
+                readyToClaim: c.readyToClaim,
+                description: c.description,
+              })),
               note: "raw token units; USDC amounts divide by 1e6",
             }
           : { error: String((summary.reason as Error)?.message ?? summary.reason).slice(0, 200) },
@@ -725,6 +745,8 @@ export class DecibelExchange implements Exchange {
     return getMarketAddr(name, this.config.deployment.perpEngineGlobal).toString();
   }
 }
+
+const USDC_SCALE = 1e6;
 
 interface PriceRow {
   mark_px: number;
