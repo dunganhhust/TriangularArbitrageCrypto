@@ -34,6 +34,8 @@ export class PaperExchange implements Exchange {
   private last = 0;
   private fillSeq = 0;
   private startEquity: number;
+  private t0 = 0;
+  private shocked = false;
   public txCount = 0;
 
   constructor(
@@ -87,15 +89,21 @@ export class PaperExchange implements Exchange {
   advance(now: number): void {
     if (this.last === 0) {
       this.last = now;
+      this.t0 = now;
       return;
     }
     const dt = Math.max(0, (now - this.last) / 1000);
     this.last = now;
     if (dt === 0) return;
-    const sigma = this.cfg.annualVolPct / 100 / Math.sqrt(365 * 86400);
+    const elapsed = (now - this.t0) / 1000;
+    const bursting = this.cfg.burstAtSec !== undefined && elapsed >= this.cfg.burstAtSec && elapsed < this.cfg.burstAtSec + this.cfg.burstSec;
+    const sigma = (this.cfg.annualVolPct / 100 / Math.sqrt(365 * 86400)) * (bursting ? this.cfg.burstMult : 1);
+    const shock = !this.shocked && this.cfg.shockAtSec !== undefined && (now - this.t0) / 1000 >= this.cfg.shockAtSec;
+    if (shock) this.shocked = true;
     for (const s of this.sims.values()) {
       this.flow(s, dt, now);
       s.mid *= Math.exp(sigma * Math.sqrt(dt) * this.gauss());
+      if (shock) s.mid *= 1 + this.cfg.shockPct / 100; // gap move through resting quotes
       this.crossThrough(s, now);
     }
   }
@@ -160,6 +168,9 @@ export class PaperExchange implements Exchange {
   getPrice(market: string): PriceInfo | null {
     const s = this.sim(market);
     return { mark: s.mid, mid: s.mid, oracle: s.mid, fundingBps: 0, ts: this.last };
+  }
+  getFees(): { maker: number; taker: number } {
+    return { maker: this.cfg.makerFeeBps / 1e4, taker: this.cfg.takerFeeBps / 1e4 };
   }
   getPosition(market: string): number {
     return this.sim(market).position;

@@ -2,22 +2,61 @@
   "network": "testnet",
   "markets": [
     {
-      "name": "BTC-USD",
-      "maxPositionUsd": 500,
-      "levelSizeUsd": 100,
-      "levels": 3,
-      "baseHalfSpreadBps": 2,
-      "levelStepBps": 1.5,
+      "name": "BTC/USD",
+      "maxPositionUsd": 40,
+      "levelSizeUsd": 10,
+      "levels": 2,
+      "baseHalfSpreadBps": 3,
+      "levelStepBps": 2,
       "inventorySkewBps": 6,
-      "minHalfSpreadBps": 0.6
+      "minHalfSpreadBps": 1.5
     }
   ],
   "points": {
-    "costBudgetBps": 0.5,
-    "dailyVolumeTargetUsd": 100000,
-    "streakMinVolumeUsd": 10000
+    "costBudgetBps": 0.3,
+    "dailyVolumeTargetUsd": 2000,
+    "streakMinVolumeUsd": 500
   },
   "risk": {
-    "maxDrawdownUsd": 50
+    "maxDrawdownUsd": 2,
+    "minGasBalanceApt": 0.05,
+    "maxGasAptPerDay": 0.1
+  },
+  "engine": {
+    "minReplaceIntervalMs": 5000,
+    "repriceBps": 3,
+    "hardMinReplaceIntervalMs": 2000
+  },
+  "ramp": {
+    "enabled": true,
+    "stages": [
+      0.5,
+      1
+    ],
+    "minStageMs": 14400000,
+    "minStageFills": 20,
+    "maxStageLossPct": 3
+  },
+  "fuse": {
+    "enabled": true,
+    "fastMoveBps": 15,
+    "fastWindowMs": 5000,
+    "slowMoveBps": 40,
+    "cooldownMs": 60000,
+    "recoverMs": 300000,
+    "recoverWiden": 2
+  },
+  "competition": {
+    "joinTouch": true,
+    "improveTicks": 0
+  },
+  "execution": {
+    "encrypted": "auto"
+  },
+  "rebate": {
+    "enabled": true,
+    "bps": 0.5,
+    "minMakerRatio": 0.8,
+    "ratioBuffer": 0.05
   }
 }

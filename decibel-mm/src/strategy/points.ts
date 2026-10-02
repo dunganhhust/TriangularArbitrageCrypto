@@ -32,6 +32,12 @@ interface Pending {
 }
 
 export interface PointsStats {
+  /** Half-month rebate cycle, e.g. "2026-10-A" (1st-15th) or "2026-10-B" (16th-end), UTC. */
+  cycleKey: string;
+  cycleMakerVolumeUsd: number;
+  cycleTakerVolumeUsd: number;
+  /** Maker share of this cycle's volume, or null before any volume. */
+  cycleMakerRatio: number | null;
   dayKey: string;
   dayVolumeUsd: number;
   dayMakerVolumeUsd: number;
@@ -48,6 +54,10 @@ export interface PointsStats {
 
 const DAY_MS = 86_400_000;
 const utcDayKey = (ts: number): string => new Date(ts).toISOString().slice(0, 10);
+export const cycleKeyOf = (ts: number): string => {
+  const d = new Date(ts);
+  return `${d.toISOString().slice(0, 7)}-${d.getUTCDate() <= 15 ? "A" : "B"}`;
+};
 
 /**
  * Adapts the quote aggressiveness to buy as much maker volume as the cost budget allows.
@@ -62,6 +72,9 @@ export class PointsController {
   private mult: number;
   private lastControl = 0;
   private day = "";
+  private cycle = "";
+  private cycleMaker = 0;
+  private cycleTaker = 0;
   private dayVol = 0;
   private dayMaker = 0;
   private dayTaker = 0;
@@ -69,6 +82,8 @@ export class PointsController {
   private ewmaNum = 0; // sum of pnlUsd, decayed
   private ewmaDen = 0; // sum of notional, decayed
   private now = 0;
+  /** Gross markouts (bps, positive = good for us) of the most recent fills. */
+  private recentMarkouts: number[] = [];
 
   constructor(
     private readonly cfg: PointsConfig,
@@ -84,12 +99,25 @@ export class PointsController {
     if (s.spreadMult) this.mult = clamp(s.spreadMult, this.cfg.minSpreadMult, this.cfg.maxSpreadMult);
   }
 
+  /** Restore this half-month cycle's volumes after a restart (ignored if the cycle has changed). */
+  restoreCycle(s: { cycleKey: string; makerUsd: number; takerUsd: number }, now: number): void {
+    if (s.cycleKey !== cycleKeyOf(now)) return;
+    this.cycle = s.cycleKey;
+    this.cycleMaker = s.makerUsd;
+    this.cycleTaker = s.takerUsd;
+  }
+
   onFill(fill: Fill, refMid: number): void {
     this.rollDay(fill.ts);
     const n = fill.price * fill.size;
     this.dayVol += n;
-    if (fill.isMaker) this.dayMaker += n;
-    else this.dayTaker += n;
+    if (fill.isMaker) {
+      this.dayMaker += n;
+      this.cycleMaker += n;
+    } else {
+      this.dayTaker += n;
+      this.cycleTaker += n;
+    }
     this.dayFees += fill.feeUsd;
     this.pending.push({ fill, refMid });
   }
@@ -122,9 +150,28 @@ export class PointsController {
     const lambda = Math.pow(0.5, n / this.cfg.ewmaHalfLifeUsd);
     this.ewmaNum = this.ewmaNum * lambda + pnlUsd;
     this.ewmaDen = this.ewmaDen * lambda + n;
+    this.recentMarkouts.push((dir * (laterMid - fill.price)) / fill.price * 1e4);
+    if (this.recentMarkouts.length > 20) this.recentMarkouts.shift();
+  }
+
+  /** Average gross markout of the last `n` resolved fills, or null with fewer than `n`. */
+  toxicity(n: number): number | null {
+    if (this.recentMarkouts.length < n) return null;
+    const w = this.recentMarkouts.slice(-n);
+    return w.reduce((a, b) => a + b, 0) / n;
+  }
+
+  /** Forget recent markouts (after the fuse has acted on them). */
+  resetToxicity(): void {
+    this.recentMarkouts = [];
   }
 
   private rollDay(ts: number): void {
+    const ck = cycleKeyOf(ts);
+    if (ck !== this.cycle) {
+      this.cycle = ck;
+      this.cycleMaker = this.cycleTaker = 0;
+    }
     const key = utcDayKey(ts);
     if (key !== this.day) {
       this.day = key;
@@ -172,7 +219,12 @@ export class PointsController {
 
   stats(now: number): PointsStats {
     this.rollDay(now);
+    const cv = this.cycleMaker + this.cycleTaker;
     return {
+      cycleKey: this.cycle,
+      cycleMakerVolumeUsd: this.cycleMaker,
+      cycleTakerVolumeUsd: this.cycleTaker,
+      cycleMakerRatio: cv > 0 ? this.cycleMaker / cv : null,
       dayKey: this.day,
       dayVolumeUsd: this.dayVol,
       dayMakerVolumeUsd: this.dayMaker,

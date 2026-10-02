@@ -1,0 +1,31 @@
+# Runs the dashboard (with the Start / End buttons) as a service that restarts itself.
+#
+# Install, as a user with sudo (NOT as `mm`), after stopping any dashboard started by hand:
+#   sudo cp /home/mm/TriangularArbitrageCrypto/decibel-mm/deploy/decibel-dashboard.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now decibel-dashboard
+#   journalctl -u decibel-dashboard -n 30 --no-pager
+#
+# Edit User= and the paths if the project lives elsewhere. Do not also run `nohup ... dashboard` by hand: the port
+# would be taken.
+[Unit]
+Description=Decibel MM dashboard (localhost:8787)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=mm
+WorkingDirectory=/home/mm/TriangularArbitrageCrypto/decibel-mm
+# A login shell so that node is found the same way it is in an interactive session.
+ExecStart=/bin/bash -lc 'exec node --import tsx src/cli.ts dashboard config.json --port 8787 --control'
+Restart=always
+RestartSec=3
+
+# IMPORTANT. The trading bot is started by the dashboard as a detached child of this service. With the default
+# KillMode=control-group, stopping or restarting this service would kill the bot too, without cancelling its orders.
+# KillMode=process signals only the dashboard itself and leaves the bot running.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

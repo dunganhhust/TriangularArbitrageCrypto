@@ -1,7 +1,7 @@
 /** Domain types. All prices/sizes here are HUMAN units (USD per base, base units). */
 
 export interface MarketSpec {
-  name: string; // e.g. "BTC-USD"
+  name: string; // e.g. "BTC/USD" (mainnet names use a slash; `npm run check` lists them)
   addr: string;
   pxDecimals: number;
   szDecimals: number;
@@ -69,6 +69,15 @@ export interface PointsSnapshot {
   takerFeeRate: number | null;
   volume30dUsd: number | null;
   feeTier: number | null;
+  /** Lifetime trading points for the owner (public endpoint; `tradingAmps` is internal-only). */
+  totalPoints?: number | null;
+  /** Share of the fee-window volume that was maker (what market-maker fee tiers are judged on). */
+  makerFraction?: number | null;
+  /** Maker-rebate / fee-rebate campaign rewards earned so far and ready to claim, in USD. */
+  rebateEarnedUsd?: number | null;
+  rebateReadyUsd?: number | null;
+  /** Endpoints that failed (as opposed to returning empty data), for diagnostics. */
+  unavailable?: string[];
 }
 
 export const notional = (price: number, size: number): number => price * size;

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildLadder, isLadderThreatened, microprice, needsReplace, stripOwn } from "../src/strategy/quoter.js";
+import { buildLadder, isLadderThreatened, microprice, needsReplace, stripOwn, topDriftBps } from "../src/strategy/quoter.js";
 import type { QuoteParams } from "../src/strategy/quoter.js";
 import type { Book, MarketSpec } from "../src/types.js";
 
@@ -61,6 +61,14 @@ describe("buildLadder", () => {
     expect(vol.asks[0]!.price).toBeGreaterThan(base.asks[0]!.price);
   });
 
+  it("treats minHalfSpreadBps as a true floor even when spreadMult < 1", () => {
+    const p = { ...params, baseHalfSpreadBps: 2, minHalfSpreadBps: 1.5, spreadMult: 0.5, levels: 1 };
+    const l = buildLadder({ spec, fair: 60000, position: 0, book: null, params: p });
+    // 1.5 bps of 60000 = 9; bid must be at or below 59991, ask at or above 60009.
+    expect(l.bids[0]!.price).toBeLessThanOrEqual(59991);
+    expect(l.asks[0]!.price).toBeGreaterThanOrEqual(60009);
+  });
+
   it("returns nothing without a price", () => {
     expect(buildLadder({ spec, fair: 0, position: 0, book: null, params })).toEqual({ bids: [], asks: [] });
   });
@@ -90,9 +98,67 @@ describe("book helpers", () => {
     expect(needsReplace(t, noise, rules)).toBe(false);
   });
 
-  it("flags a ladder the market has run into", () => {
+  it("flags a ladder only when the market has reached or passed it", () => {
     const live = { bids: [{ price: 100, size: 1 }], asks: [{ price: 101, size: 1 }] };
-    expect(isLadderThreatened(live, book(99, 100.001), 0.3)).toBe(true); // ask fell onto our bid
-    expect(isLadderThreatened(live, book(99.5, 101.5), 0.3)).toBe(false);
+    expect(isLadderThreatened(live, book(98, 99.9), 0)).toBe(true); // ask fell through our bid
+    expect(isLadderThreatened(live, book(101.5, 102), 0)).toBe(true); // bid rose through our ask
+    expect(isLadderThreatened(live, book(99.5, 101.5), 0)).toBe(false);
+    // Quotes hugging the touch of a tight market are normal, not threatened.
+    expect(isLadderThreatened(live, book(99.99, 100.001), 0)).toBe(false);
+    // Tolerance widens the trigger.
+    expect(isLadderThreatened(live, book(99.99, 100.001), 0.3)).toBe(true);
+  });
+});
+
+describe("touch competition", () => {
+  const tight: Book = { bids: [{ price: 59999.9, size: 1 }], asks: [{ price: 60000.1, size: 1 }], ts: 0 };
+  const comp = { joinTouch: true, improveTicks: 0, makerFeeBps: 1.5, maxCostBps: 2 };
+  const wide = { ...params, baseHalfSpreadBps: 6, minHalfSpreadBps: 5, levels: 1 };
+
+  it("joins the touch when the cost is within budget", () => {
+    const l = buildLadder({ spec, fair: 60000, position: 0, book: tight, params: { ...wide, competition: comp } });
+    expect(l.bids[0]!.price).toBe(59999.9);
+    expect(l.asks[0]!.price).toBe(60000.1);
+  });
+
+  it("stays back when sitting at the touch would cost more than the budget", () => {
+    const l = buildLadder({ spec, fair: 60000, position: 0, book: tight, params: { ...wide, competition: { ...comp, maxCostBps: 0.3 } } });
+    expect(l.bids[0]!.price).toBeLessThan(59990);
+    expect(l.asks[0]!.price).toBeGreaterThan(60010);
+  });
+
+  it("does nothing when competition is off", () => {
+    const l = buildLadder({ spec, fair: 60000, position: 0, book: tight, params: { ...wide, competition: { ...comp, joinTouch: false } } });
+    expect(l.bids[0]!.price).toBeLessThan(59990);
+  });
+
+  it("refuses to join the side that would add to a one-sided inventory", () => {
+    const long = buildLadder({ spec, fair: 60000, position: 400 / 60000, book: tight, params: { ...wide, competition: comp } });
+    expect(long.bids[0]!.price).toBeLessThan(59990); // would add to a long: stays back
+    expect(long.asks[0]!.price).toBeLessThanOrEqual(60000.1); // free to join the offer to reduce
+  });
+
+  it("improves the touch by a tick only when the spread leaves room", () => {
+    const roomy: Book = { bids: [{ price: 59999, size: 1 }], asks: [{ price: 60001, size: 1 }], ts: 0 };
+    const c = { ...comp, improveTicks: 2, maxCostBps: 10 };
+    const l = buildLadder({ spec, fair: 60000, position: 0, book: roomy, params: { ...wide, competition: c } });
+    expect(l.bids[0]!.price).toBeCloseTo(59999.2, 5);
+    const l2 = buildLadder({ spec, fair: 60000, position: 0, book: tight, params: { ...wide, competition: c } });
+    expect(l2.bids[0]!.price).toBe(59999.9); // 2 ticks of spread: no room to improve
+  });
+
+  it("never crosses even when joining", () => {
+    const l = buildLadder({ spec, fair: 60000, position: 0, book: tight, params: { ...wide, competition: { ...comp, improveTicks: 5, maxCostBps: 50 } } });
+    expect(l.bids[0]!.price).toBeLessThan(l.asks[0]!.price);
+    expect(l.bids[0]!.price).toBeLessThanOrEqual(60000.0);
+  });
+});
+
+describe("topDriftBps", () => {
+  it("measures the larger of the best-bid and best-ask moves", () => {
+    const a = { bids: [{ price: 100, size: 1 }], asks: [{ price: 101, size: 1 }] };
+    const b = { bids: [{ price: 100.1, size: 1 }], asks: [{ price: 101, size: 1 }] };
+    expect(topDriftBps(a, b)).toBeCloseTo(9.99, 1);
+    expect(topDriftBps(null, b)).toBe(0);
   });
 });

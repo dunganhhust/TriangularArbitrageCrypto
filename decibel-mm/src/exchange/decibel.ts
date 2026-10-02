@@ -1,16 +1,26 @@
-import { Ed25519Account, Ed25519PrivateKey } from "@aptos-labs/ts-sdk";
+import {
+  Ed25519Account,
+  Ed25519PrivateKey,
+  MIN_ENCRYPTED_TXN_GAS_UNIT_PRICE,
+  buildTransaction,
+  generateTransactionPayload,
+} from "@aptos-labs/ts-sdk";
+import { randomBytes } from "node:crypto";
+import type { CommittedTransactionResponse, InputGenerateTransactionPayloadData } from "@aptos-labs/ts-sdk";
 import {
   DecibelReadDex,
   DecibelWriteDex,
   MAINNET_CONFIG,
   TESTNET_CONFIG,
   TimeInForce,
+  configSupportsEncryptedSubmission,
   getMarketAddr,
 } from "@decibeltrade/sdk";
-import type { DecibelConfig } from "@decibeltrade/sdk";
+import type { DecibelConfig, SendTxOpts } from "@decibeltrade/sdk";
 import type { LiveEnv } from "../config.js";
 import type { AccountInfo, Book, BookLevel, Fill, Ladder, MarketSpec, PointsSnapshot, PriceInfo } from "../types.js";
-import type { Exchange, ReduceRequest } from "./exchange.js";
+import type { Exchange, GasStats, ReduceRequest } from "./exchange.js";
+import { feeWindow, inferFee } from "./fees.js";
 
 type Units = "human" | "chain";
 
@@ -19,6 +29,8 @@ export interface DecibelOpts {
   env: LiveEnv;
   /** Log transactions instead of sending them. Reads and streams stay live. */
   dryRun?: boolean;
+  /** Encrypted (front-run resistant) submission: "auto" uses it when the node supports it. */
+  encrypted?: "auto" | "on" | "off";
   /** Override unit auto-detection. */
   priceUnits?: Units | 'auto';
   sizeUnits?: Units | 'auto';
@@ -53,8 +65,113 @@ export function detectUnits(
   return "unknown";
 }
 
-/** Subclass only to reach the SDK's protected `sendTx` for the perp bulk-order entry points. */
-class MMWrite extends DecibelWriteDex {
+/** Highest max_gas_amount we will reserve while simulating (units; reserve = units * gas price). */
+export const SIM_GAS_CEILING = 50_000;
+/** Floor for the max_gas_amount we submit with. */
+export const MIN_SUBMIT_GAS = 2_000;
+
+/** max_gas_amount to submit with: 2x the simulated usage, within [MIN_SUBMIT_GAS, SIM_GAS_CEILING]. */
+export function submitGasFor(gasUsed: number): number {
+  return Math.min(SIM_GAS_CEILING, Math.max(Math.ceil(gasUsed * 2), MIN_SUBMIT_GAS));
+}
+
+type SignAndSubmit = (
+  signer: unknown,
+  tx: unknown,
+  telemetry: { encrypted: boolean; functionId?: string },
+) => Promise<CommittedTransactionResponse>;
+
+/**
+ * Subclass for (1) the perp bulk-order entry points, which the SDK only wraps for spot, and
+ * (2) a self-pay `sendTx`.
+ *
+ * The SDK's self-pay path simulates with `estimateMaxGasAmount`, which makes the node report the
+ * account's whole balance as max gas, then submits with 2x that. The fee reserve is then twice
+ * the balance, so every transaction is rejected with INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE
+ * whatever the balance. We simulate with a fixed ceiling instead, read the real gas used, and
+ * submit with a max sized from that. A failing simulation throws before anything is paid.
+ */
+export class MMWrite extends DecibelWriteDex {
+  /** Gas units a given function actually used (largest recent value), for the unsimulated encrypted path. */
+  readonly learnedGas = new Map<string, number>();
+  private encFailures = 0;
+  encryptionBroken = false;
+  /** Which path the last transaction took. */
+  lastPath: "encrypted" | "plain" = "plain";
+
+  /** Simulate with a fixed ceiling and return the gas actually used. Throws before anything is paid. */
+  async simulateGasUsed(payload: InputGenerateTransactionPayloadData, sender: Parameters<MMWrite["buildTx"]>[1]): Promise<number> {
+    const probe = await this.buildTx({ ...payload, maxGasAmount: SIM_GAS_CEILING }, sender);
+    const [sim] = await this.aptos.transaction.simulate.simple({ transaction: probe });
+    if (!sim) throw new Error("Transaction simulation returned no results");
+    if (!sim.success) throw new Error(`Simulation failed: ${sim.vm_status}`);
+    return Number(sim.gas_used);
+  }
+
+  protected override async sendTx(
+    payload: InputGenerateTransactionPayloadData,
+    { accountOverride }: SendTxOpts = {},
+  ): Promise<CommittedTransactionResponse> {
+    const signer = accountOverride ?? this.account;
+    const sender = signer.accountAddress;
+    const used = await this.simulateGasUsed(payload, sender);
+    const tx = await this.buildTx({ ...payload, maxGasAmount: submitGasFor(used) }, sender);
+    const functionId = "function" in payload ? String(payload.function) : undefined;
+    this.lastPath = "plain";
+    return (this as unknown as { signAndSubmit: SignAndSubmit }).signAndSubmit(signer, tx, { encrypted: false, functionId });
+  }
+
+  /**
+   * Encrypted submission hides the order from anyone watching pending transactions, which is the
+   * front-running surface on a chain with public mempools. The SDK's encrypted path cannot
+   * simulate and reserves the chain default of 2,000,000 gas units, i.e. it needs more than 2 APT
+   * of balance. We learn each function's real gas with one plain simulation, then submit encrypted
+   * with a max sized from it. Falls back to the plain path when the node does not support
+   * encryption, or after repeated encrypted failures.
+   */
+  protected override async sendEncryptedTx(
+    payload: InputGenerateTransactionPayloadData,
+    opts: SendTxOpts = {},
+  ): Promise<CommittedTransactionResponse> {
+    const internals = this as unknown as { canEncrypt(): Promise<boolean>; signAndSubmit: SignAndSubmit };
+    if (this.encryptionBroken || !(await internals.canEncrypt())) return this.sendTx(payload, opts);
+
+    const signer = opts.accountOverride ?? this.account;
+    const sender = signer.accountAddress;
+    const functionId = "function" in payload ? String(payload.function) : "unknown";
+    let learned = this.learnedGas.get(functionId);
+    if (learned === undefined) {
+      learned = await this.simulateGasUsed(payload, sender);
+      this.learnedGas.set(functionId, learned);
+    }
+    try {
+      const txPayload = await generateTransactionPayload({ aptosConfig: this.aptos.config, ...payload } as never);
+      const tx = await buildTransaction({
+        aptosConfig: this.aptos.config,
+        sender,
+        payload: txPayload,
+        options: {
+          encrypted: true,
+          replayProtectionNonce: randomNonce(),
+          gasUnitPrice: MIN_ENCRYPTED_TXN_GAS_UNIT_PRICE,
+          maxGasAmount: submitGasFor(learned),
+        },
+      } as never);
+      const r = await internals.signAndSubmit(signer, tx, { encrypted: true, functionId });
+      this.encFailures = 0;
+      this.lastPath = "encrypted";
+      if (!r.success && /out of gas/i.test(String(r.vm_status))) {
+        this.learnedGas.set(functionId, Math.min(SIM_GAS_CEILING, learned * 2));
+      } else if (r.gas_used !== undefined) {
+        this.learnedGas.set(functionId, Math.max(Number(r.gas_used), Math.floor(learned * 0.9)));
+      }
+      return r;
+    } catch (e) {
+      if (++this.encFailures >= 2) this.encryptionBroken = true;
+      throw e;
+    }
+  }
+
   async placeBulk(args: {
     marketAddr: string;
     sequenceNumber: number;
@@ -63,9 +180,10 @@ class MMWrite extends DecibelWriteDex {
     askPrices: number[];
     askSizes: number[];
   }) {
+    const send = this.defaultEncrypted ? this.sendEncryptedTx.bind(this) : this.sendTx.bind(this);
     return this.sendSubaccountTx(
       (sub) =>
-        this.sendTx({
+        send({
           function: `${this.config.deployment.package}::dex_accounts_entry::place_bulk_orders_to_subaccount`,
           typeArguments: [],
           functionArguments: [
@@ -103,6 +221,9 @@ export class DecibelExchange implements Exchange {
   private szUnits = new Map<string, Units>();
   private seq = new Map<string, number>();
   private timers: NodeJS.Timeout[] = [];
+  private txCount = 0;
+  private gasOctas = 0;
+  private balanceApt: number | null = null;
   private makerRate = 0.00011;
   private takerRate = 0.00034;
   private readonly log: (msg: string, extra?: Record<string, unknown>) => void;
@@ -119,7 +240,14 @@ export class DecibelExchange implements Exchange {
       nodeApiKey: env.nodeApiKey,
       onWsError: (e) => this.log("ws error", { error: String((e as { message?: string }).message ?? e) }),
     });
-    this.write = new MMWrite(this.config, account, { nodeApiKey: env.nodeApiKey });
+    this.write = new MMWrite(this.config, account, {
+      nodeApiKey: env.nodeApiKey,
+      defaultEncrypted: (this.o.encrypted ?? "auto") !== "off",
+      onTransactionSettled: (m) => {
+        this.txCount++;
+        this.gasOctas += (m.gasUsed ?? 0) * (m.gasUnitPrice ?? 0);
+      },
+    });
     this.write.subaccount = env.subaccount;
 
     const all = await this.read.markets.getAll();
@@ -157,12 +285,14 @@ export class DecibelExchange implements Exchange {
     for (const name of marketNames) await this.bootstrapMarket(name);
     await this.refreshAccount();
     await this.refreshPositions();
+    await this.refreshGasBalance();
 
     this.unsubs.push(
       this.read.userTradeHistory.subscribeByAddr(env.subaccount, (msg) => this.onTrades(msg.trades as unknown as TradeRow[])),
     );
     this.timers.push(setInterval(() => void this.refreshPositions().catch(() => {}), 1000));
     this.timers.push(setInterval(() => void this.refreshAccount().catch(() => {}), 5000));
+    this.timers.push(setInterval(() => void this.refreshGasBalance().catch(() => {}), 15_000));
     return out;
   }
 
@@ -223,7 +353,12 @@ export class DecibelExchange implements Exchange {
     const ps = this.pxScale(name);
     const ss = this.szScale(name);
     const conv = (l: BookLevel): BookLevel => ({ price: l.price / ps, size: l.size / ss });
-    return { bids: bids.map(conv), asks: asks.map(conv), ts: ts || Date.now() };
+    // The wire order of depth levels is undocumented; the engine relies on best-first, so sort.
+    return {
+      bids: bids.map(conv).sort((a, b) => b.price - a.price),
+      asks: asks.map(conv).sort((a, b) => a.price - b.price),
+      ts: ts || Date.now(),
+    };
   }
 
   private toPrice(name: string, p: PriceRow): PriceInfo {
@@ -250,6 +385,26 @@ export class DecibelExchange implements Exchange {
     this.account = { equityUsd: ov.perp_equity_balance, ts: Date.now() };
   }
 
+  /** The signing (hot) account pays gas in APT unless a gas station is configured. */
+  private async refreshGasBalance(): Promise<void> {
+    try {
+      const octas = await this.write.aptos.getAccountAPTAmount({ accountAddress: this.write.account.accountAddress });
+      this.balanceApt = Number(octas) / 1e8;
+    } catch (e) {
+      // A key that never received funds has no on-chain account yet: that is a zero balance.
+      if (/not\s*found|404|does not exist/i.test(String(e))) this.balanceApt = 0;
+      else this.log("gas balance lookup failed", { error: String(e).slice(0, 160) });
+    }
+  }
+
+  getFees(): { maker: number; taker: number } {
+    return { maker: this.makerRate, taker: this.takerRate };
+  }
+
+  getGas(): GasStats {
+    return { txCount: this.txCount, gasApt: this.gasOctas / 1e8, balanceApt: this.balanceApt };
+  }
+
   private async refreshPositions(): Promise<void> {
     const rows = await this.read.userPositions.getByAddr({ subAddr: this.o.env.subaccount, limit: 50 });
     const next = new Map<string, number>();
@@ -271,7 +426,10 @@ export class DecibelExchange implements Exchange {
       if (!side) continue;
       const price = r.price / this.pxScale(name);
       const size = r.size / this.szScale(name);
-      const isMaker = !(r.client_order_id ?? "").startsWith("tk-");
+      // Judge maker/taker by the fee actually charged; fall back to how we sent the order.
+      const inferred = inferFee(r.fee_amount, r.is_rebate, price * size, this.makerRate, this.takerRate);
+      const sentAsTaker = (r.client_order_id ?? "").startsWith("tk-");
+      const isMaker = inferred && this.makerRate !== this.takerRate ? inferred.isMaker : !sentAsTaker;
       const rate = isMaker ? this.makerRate : this.takerRate;
       this.fills.push({
         id: r.trade_id,
@@ -279,7 +437,7 @@ export class DecibelExchange implements Exchange {
         side,
         price,
         size,
-        feeUsd: price * size * (r.is_rebate ? -Math.abs(rate) : rate),
+        feeUsd: inferred ? inferred.feeUsd : price * size * (r.is_rebate ? -Math.abs(rate) : rate),
         isMaker,
         ts: r.transaction_unix_ms,
       });
@@ -339,13 +497,15 @@ export class DecibelExchange implements Exchange {
     const chain = this.toChain(market, ladder);
     const sequenceNumber = this.nextSeq(market);
     if (this.o.dryRun) {
-      this.log("DRY-RUN place_bulk_orders", { market, sequenceNumber, ...chain });
+      this.log("DRY-RUN place_bulk_orders", { market, sequenceNumber, ...chain, quotes: humanQuotes(ladder) });
       return true;
     }
     try {
       const tx = await this.write.placeBulk({ marketAddr: spec.addr, sequenceNumber, ...chain });
-      const ok = (tx as { success?: boolean }).success !== false;
-      if (!ok) this.log("bulk order tx failed", { market, vm: (tx as { vm_status?: string }).vm_status });
+      const r = tx as { success?: boolean; vm_status?: string; hash?: string; gas_used?: string };
+      const ok = r.success !== false;
+      if (!ok) this.log("bulk order tx failed", { market, vm: r.vm_status });
+      else this.log("ladder placed", { market, sequenceNumber, hash: r.hash, gasUsed: r.gas_used, path: this.write.lastPath, bids: ladder.bids.length, asks: ladder.asks.length, quotes: humanQuotes(ladder) });
       return ok;
     } catch (e) {
       this.log("bulk order tx error", { market, error: String(e) });
@@ -359,7 +519,8 @@ export class DecibelExchange implements Exchange {
       return true;
     }
     try {
-      const tx = await this.write.cancelBulkOrder({ marketName: market, subaccountAddr: this.o.env.subaccount });
+      // Cancels are the safety-critical path: always use the simulated plain route, never the encrypted one.
+      const tx = await this.write.cancelBulkOrder({ marketName: market, subaccountAddr: this.o.env.subaccount, encrypted: false });
       return (tx as { success?: boolean }).success !== false;
     } catch (e) {
       this.log("cancel error", { market, error: String(e) });
@@ -403,12 +564,18 @@ export class DecibelExchange implements Exchange {
       volume30dUsd: null,
       feeTier: null,
     };
-    const [daily, streak, tier, fees] = await Promise.allSettled([
+    const [daily, streak, tier, fees, total, camp] = await Promise.allSettled([
       this.read.tradingAmps.getDailyByOwner({ ownerAddr: owner, days: 2 }),
       this.read.streaks.getByOwner({ ownerAddr: owner }),
       this.read.tier.getByOwner({ ownerAddr: owner }),
       this.read.userFees.getByAddr({ subAddr: subaccount }),
+      this.read.tradingPoints.getByOwner({ ownerAddr: owner }),
+      this.read.campaigns.getSummary({ accountAddress: owner, limit: 50, offset: 0 }),
     ]);
+    const names = ["tradingAmps", "streaks", "tier", "userFees", "tradingPoints", "campaigns"] as const;
+    snap.unavailable = [daily, streak, tier, fees, total, camp]
+      .map((r, i) => (r.status === "rejected" ? `${names[i]}: ${String((r.reason as Error)?.message ?? r.reason).slice(0, 120)}` : ""))
+      .filter(Boolean);
     if (daily.status === "fulfilled") {
       const today = [...daily.value.days].sort((a, b) => b.day_start_unix_ms - a.day_start_unix_ms)[0];
       if (today) {
@@ -416,6 +583,13 @@ export class DecibelExchange implements Exchange {
         snap.tradingAmpsToday = today.trading_amps;
         snap.streakAmpsToday = today.streak_amps;
       }
+    }
+    if (total.status === "fulfilled") snap.totalPoints = total.value.total_points;
+    if (camp.status === "fulfilled") {
+      // Reward amounts are raw token units; the reward asset is USDC (6 decimals).
+      const rebate = camp.value.breakdownByType.filter((b) => b.campaignType === "maker_incentive" || b.campaignType === "fee_rebate");
+      snap.rebateEarnedUsd = rebate.reduce((a, b) => a + b.lifetimeEarned, 0) / USDC_SCALE;
+      snap.rebateReadyUsd = rebate.reduce((a, b) => a + b.readyToClaim, 0) / USDC_SCALE;
     }
     if (streak.status === "fulfilled") snap.currentStreak = streak.value.currentStreak;
     if (tier.status === "fulfilled") snap.tier = tier.value.current_tier;
@@ -425,6 +599,9 @@ export class DecibelExchange implements Exchange {
       snap.makerFeeRate = this.makerRate;
       snap.takerFeeRate = this.takerRate;
       snap.feeTier = fees.value.fee_tier as unknown as number;
+      const w = feeWindow(fees.value.daily_user_volume);
+      snap.makerFraction = w.makerFraction;
+      snap.volume30dUsd = w.totalUsd;
     }
     return snap;
   }
@@ -435,16 +612,156 @@ export class DecibelExchange implements Exchange {
     return {
       network: this.o.network,
       subaccount: this.o.env.subaccount,
+      // Configured markets in human units: what you need to size quotes (min order value in USD).
+      // Volume is the ceiling on what a maker can fill: every maker fill is the other side of a trade.
+      marketActivity: await this.read.marketContexts
+        .getAll()
+        .then((rows) => {
+          const nameOf = new Map(markets.map((m) => [m.market_addr.toLowerCase(), m.market_name]));
+          const named = rows.map((r) => ({ market: nameOf.get(r.market.toLowerCase()) ?? r.market, volume24h: r.volume_24h, openInterest: r.open_interest, change24hPct: r.price_change_pct_24h }));
+          const sorted = [...named].sort((a, b) => b.volume24h - a.volume24h);
+          return {
+            platformVolume24hUsd: Math.round(named.reduce((a, r) => a + r.volume24h, 0)),
+            marketsWithVolume: named.filter((r) => r.volume24h > 0).length,
+            top10ByVolume24h: sorted.slice(0, 10).map((r) => ({ market: r.market, volume24h: Math.round(r.volume24h) })),
+            configured: named.filter((r) => this.specs.has(r.market)),
+          };
+        })
+        .catch((e: unknown) => ({ error: String(e).slice(0, 160) })),
+      configured: [...this.specs.values()].map((sp) => {
+        const mid = this.prices.get(sp.name)?.mid ?? null;
+        const lev = markets.find((m) => m.market_name === sp.name)?.max_leverage ?? null;
+        return {
+          name: sp.name,
+          pxDecimals: sp.pxDecimals,
+          szDecimals: sp.szDecimals,
+          tickSize: sp.tickSize,
+          lotSize: sp.lotSize,
+          minSize: sp.minSize,
+          mid,
+          minOrderUsd: mid === null ? null : Number((sp.minSize * mid).toFixed(2)),
+          maxLeverage: lev,
+        };
+      }),
       markets: markets.map((m) => ({ name: m.market_name, tick: m.tick_size, lot: m.lot_size, min: m.min_size, maxLev: m.max_leverage, mode: m.mode })),
       equity: this.account?.equityUsd,
+      // Resting bulk-order ladders as the indexer sees them (human units). The web app's Open Orders
+      // tab may not list bulk orders, so this is the reliable way to confirm quotes are live.
+      bulkOrders: await this.read.userBulkOrders
+        .getByAddr({ subAddr: this.o.env.subaccount })
+        .then((rows) =>
+          rows.map((r) => {
+            const name = this.byAddr.get(r.market.toLowerCase()) ?? r.market;
+            const ps = this.specs.has(name) ? this.pxScale(name) : 1;
+            const ss = this.specs.has(name) ? this.szScale(name) : 1;
+            return {
+              market: name,
+              sequenceNumber: r.sequence_number,
+              bids: r.bid_prices.map((p, i) => ({ price: p / ps, size: (r.bid_sizes[i] ?? 0) / ss })),
+              asks: r.ask_prices.map((p, i) => ({ price: p / ps, size: (r.ask_sizes[i] ?? 0) / ss })),
+              cancellationReason: r.cancellation_reason ?? null,
+            };
+          }),
+        )
+        .catch((e: unknown) => ({ error: String(e).slice(0, 200) })),
+      fees: await this.feeReport(),
+      campaigns: await this.campaignReport(),
+      execution: await this.executionInfo(),
+      signer: { address: this.write.account.accountAddress.toString(), aptBalance: this.balanceApt, paysGas: true },
       points: await this.getPoints(),
     };
+  }
+
+  /** The full fee ladder: where a maker rebate would come from, and how far this account is from it. */
+  private async feeReport(): Promise<Record<string, unknown>> {
+    try {
+      const f = await this.read.userFees.getByAddr({ subAddr: this.o.env.subaccount });
+      const w = feeWindow(f.daily_user_volume);
+      const bps = (x: number): number => Number((x * 1e4).toFixed(3));
+      return {
+        tier: f.fee_tier,
+        makerBps: bps(f.user_maker_rate),
+        takerBps: bps(f.user_taker_rate),
+        referralDiscount: f.fee_schedule.referral_discount,
+        activeReferralDiscount: f.active_referral_discount,
+        volumeTiers: f.fee_schedule.tiers.vip.map((t) => ({ volumeAtLeastUsd: t.volume_threshold, makerBps: bps(t.maker), takerBps: bps(t.taker) })),
+        // Tiers judged on the share of volume that is maker; a negative makerBps is a rebate.
+        marketMakerTiers: f.fee_schedule.tiers.market_maker.map((t) => ({ makerFractionAtLeast: t.maker_fraction_threshold, makerBps: bps(t.maker) })),
+        window: { ...w, days: f.daily_user_volume.length },
+      };
+    } catch (e) {
+      return { error: String(e).slice(0, 200) };
+    }
+  }
+
+  /** Campaigns that can pay rebates/incentives, and what this owner has earned so far. */
+  private async campaignReport(): Promise<Record<string, unknown>> {
+    const iso = (s: number): string => new Date(s * 1000).toISOString();
+    const [active, summary] = await Promise.allSettled([
+      this.read.campaigns.getActive(),
+      this.read.campaigns.getSummary({ accountAddress: this.o.env.owner, limit: 20, offset: 0 }),
+    ]);
+    return {
+      active:
+        active.status === "fulfilled"
+          ? active.value.map((c) => ({
+              id: c.campaignId,
+              type: c.campaignType,
+              title: c.title,
+              rewardAsset: c.rewardAsset,
+              runs: `${iso(c.startTsSec)} .. ${iso(c.endTsSec)}`,
+              claimable: `${iso(c.claimStartTsSec)} .. ${iso(c.claimEndTsSec)}`,
+              totalFunded: c.totalFunded,
+              description: c.description,
+            }))
+          : { error: String((active.reason as Error)?.message ?? active.reason).slice(0, 200) },
+      mine:
+        summary.status === "fulfilled"
+          ? {
+              lifetimeEarned: summary.value.lifetimeEarned,
+              readyToClaim: summary.value.readyToClaim,
+              totalClaimed: summary.value.totalClaimed,
+              byType: summary.value.breakdownByType,
+              // Campaigns whose period has ended (maker rebates etc.) show up here, not in `active`.
+              claims: summary.value.claims.map((c) => ({
+                id: c.campaignId,
+                type: c.campaignType,
+                title: c.title,
+                status: c.status,
+                period: `${iso(c.startTsSec)} .. ${iso(c.endTsSec)}`,
+                hasAllocation: c.hasAllocation,
+                claimable: c.claimableAmount,
+                claimed: c.claimedAmount,
+                readyToClaim: c.readyToClaim,
+                description: c.description,
+              })),
+              note: "raw token units; USDC amounts divide by 1e6",
+            }
+          : { error: String((summary.reason as Error)?.message ?? summary.reason).slice(0, 200) },
+    };
+  }
+
+  private async executionInfo(): Promise<Record<string, unknown>> {
+    const mode = this.o.encrypted ?? "auto";
+    try {
+      const info = (await this.write.aptos.getLedgerInfo()) as unknown as { encryption_key?: unknown };
+      return {
+        mode,
+        configAllowsEncryption: configSupportsEncryptedSubmission(this.config),
+        nodeAdvertisesEncryptionKey: !!info.encryption_key,
+        willEncrypt: mode !== "off" && configSupportsEncryptedSubmission(this.config) && !!info.encryption_key,
+      };
+    } catch (e) {
+      return { mode, error: String(e).slice(0, 160) };
+    }
   }
 
   marketAddrFor(name: string): string {
     return getMarketAddr(name, this.config.deployment.perpEngineGlobal).toString();
   }
 }
+
+const USDC_SCALE = 1e6;
 
 interface PriceRow {
   mark_px: number;
@@ -463,6 +780,7 @@ interface TradeRow {
   size: number;
   price: number;
   is_rebate: boolean;
+  fee_amount?: number;
   client_order_id?: string;
   transaction_unix_ms: number;
 }
@@ -480,4 +798,19 @@ function sideOf(action: string): "buy" | "sell" | null {
     default:
       return null; // "Net" is ambiguous; ignore rather than guess
   }
+}
+
+/** Random non-zero 64-bit replay-protection nonce. */
+function randomNonce(): bigint {
+  let n = 0n;
+  while (n === 0n) n = BigInt(`0x${randomBytes(8).toString("hex")}`);
+  return n;
+}
+
+/** Ladder prices and sizes in human units, for the log and the dashboard. */
+function humanQuotes(ladder: Ladder): { bids: [number, number][]; asks: [number, number][] } {
+  return {
+    bids: ladder.bids.map((q) => [q.price, q.size]),
+    asks: ladder.asks.map((q) => [q.price, q.size]),
+  };
 }

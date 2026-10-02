@@ -1,14 +1,23 @@
-import { existsSync } from "node:fs";
+import { existsSync, statSync, unlinkSync } from "node:fs";
 import { loadConfig, loadLiveEnv } from "./config.js";
 import type { Config } from "./config.js";
-import { MarketMaker, jsonLogger } from "./engine.js";
+import { startDashboard } from "./dashboard/server.js";
+import { MarketMaker, jsonLogger, setRunLogFile } from "./engine.js";
 import { DecibelExchange } from "./exchange/decibel.js";
 import { PaperExchange } from "./exchange/paper.js";
+import { runLoop, Shutdown } from "./runner.js";
 
 const USAGE = `usage:
   tsx src/cli.ts paper [config.json] [--hours N]     simulated venue, no network
   tsx src/cli.ts check [config.json]                 read-only: connect, print markets/units/points
-  tsx src/cli.ts live  [config.json] [--dry-run]     trade (env: APTOS_NODE_API_KEY MM_PRIVATE_KEY MM_SUBACCOUNT MM_OWNER)`;
+  tsx src/cli.ts live  [config.json] [--dry-run] [--minutes N]
+                                                     trade (env: APTOS_NODE_API_KEY MM_PRIVATE_KEY MM_SUBACCOUNT MM_OWNER).
+                                                     With --minutes the run ends after N minutes: quotes are pulled and every
+                                                     position is closed. Creating the STOP file does the same at any time.
+  tsx src/cli.ts flatten [config.json] [--dry-run]   pull quotes and close every open position now, then exit
+  tsx src/cli.ts dashboard [config.json] [--port N] [--control] [--env-file PATH]
+                                                     web page on 127.0.0.1 (default 8787) showing the live run; with --control it
+                                                     also has Start / End buttons (needs the token in state/dashboard.token)`;
 
 function arg(name: string): string | undefined {
   const i = process.argv.indexOf(name);
@@ -18,7 +27,7 @@ function arg(name: string): string | undefined {
 async function main(): Promise<void> {
   const [cmd, maybePath] = process.argv.slice(2);
   const path = maybePath && !maybePath.startsWith("--") ? maybePath : "config.json";
-  if (!cmd || !["paper", "check", "live"].includes(cmd)) {
+  if (!cmd || !["paper", "check", "live", "flatten", "dashboard"].includes(cmd)) {
     console.log(USAGE);
     process.exit(1);
   }
@@ -28,11 +37,14 @@ async function main(): Promise<void> {
   }
   const cfg = loadConfig(path);
   if (cmd === "paper") return runPaper(cfg, Number(arg("--hours") ?? 6));
+  if (cmd === "dashboard") return runDashboard(cfg, path);
+  if (cmd === "live") setRunLogFile(cfg.engine.runLogFile);
   const env = loadLiveEnv();
   const ex = new DecibelExchange({
     network: cfg.network,
     env,
     dryRun: process.argv.includes("--dry-run"),
+    encrypted: cfg.execution.encrypted,
     priceUnits: cfg.live.priceUnits,
     sizeUnits: cfg.live.sizeUnits,
     log: (msg, extra) => jsonLogger("info", msg, extra),
@@ -43,7 +55,50 @@ async function main(): Promise<void> {
     await ex.close();
     process.exit(0);
   }
-  return runLive(cfg, ex);
+  if (cmd === "flatten") return runFlatten(cfg, ex, process.argv.includes("--dry-run"));
+  return runLive(cfg, ex, process.argv.includes("--dry-run"));
+}
+
+/** Pull quotes and close every position, then exit: 0 when flat, 3 when something could not be closed. */
+async function runFlatten(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promise<void> {
+  const names = cfg.markets.map((m) => m.name);
+  const specs = await ex.init(names);
+  const mm = new MarketMaker(cfg, ex, specs, {});
+  const before = Object.fromEntries(names.map((n) => [n, ex.getPosition(n)]));
+  const res = await mm.flattenAll({ attempts: dryRun ? 1 : undefined });
+  const after = Object.fromEntries(names.map((n) => [n, ex.getPosition(n)]));
+  await ex.close();
+  console.log(JSON.stringify({ dryRun, before, after, ...res }, null, 2));
+  process.exit(res.closed ? 0 : 3);
+}
+
+/** Read-only page over data/run.log. Needs no keys; bound to loopback only (use an SSH tunnel to see it remotely). */
+async function runDashboard(cfg: Config, configPath: string): Promise<void> {
+  const port = Number(arg("--port") ?? 8787);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    console.error(`invalid --port ${arg("--port")}`);
+    process.exit(1);
+  }
+  if (!cfg.engine.runLogFile) {
+    console.error("engine.runLogFile is empty: the bot writes no run log, so there is nothing to show");
+    process.exit(1);
+  }
+  const control = process.argv.includes("--control")
+    ? { configPath, envFile: arg("--env-file") ?? "/etc/decibel-mm/env" }
+    : null;
+  // The dashboard only reads files and answers HTTP: an unexpected error in one request must not take it down.
+  process.on("unhandledRejection", (e) => console.error("dashboard: unhandled rejection (continuing)", e));
+  process.on("uncaughtException", (e) => console.error("dashboard: uncaught exception (continuing)", e));
+  await startDashboard({
+    port,
+    logFile: cfg.engine.runLogFile,
+    liveFile: cfg.engine.liveFile,
+    killFile: cfg.engine.killSwitchFile,
+    stopFile: cfg.engine.stopFile,
+    control: control ? { ...control, cwd: process.cwd(), tokenFile: "state/dashboard.token", pidFile: "state/bot.pid", stdoutFile: "data/stdout.log" } : null,
+  });
+  console.log(`dashboard: http://localhost:${port}  (reads ${cfg.engine.runLogFile}; Ctrl+C to stop)`);
+  if (control) console.log("điều khiển: BẬT (nút Bắt đầu / Kết thúc). Mã truy cập nằm trong state/dashboard.token (chỉ chủ tài khoản đọc được)");
 }
 
 /** Fast-forward simulation: one engine step per `tickMs` of simulated time. */
@@ -97,40 +152,76 @@ async function runPaper(cfg: Config, hours: number): Promise<void> {
   );
 }
 
-async function runLive(cfg: Config, ex: DecibelExchange): Promise<void> {
+async function runLive(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promise<void> {
+  const launched = Date.now();
+  const minutesArg = arg("--minutes");
+  let endsAt: number | null = null;
+  if (minutesArg !== undefined) {
+    const minutes = Number(minutesArg);
+    if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 10_080) {
+      console.error(`--minutes must be between 1 and 10080, got ${minutesArg}`);
+      process.exit(1);
+    }
+    endsAt = launched + Math.round(minutes * 60_000);
+  }
+  // First line of the run: the dashboard treats everything after the latest such line as the current run.
+  jsonLogger("info", "market maker started", {
+    markets: cfg.markets.map((m) => m.name),
+    network: cfg.network,
+    dryRun,
+    pid: process.pid,
+    endsAt: endsAt === null ? null : new Date(endsAt).toISOString(),
+    marketCfg: cfg.markets.map((m) => ({ name: m.name, maxPositionUsd: m.maxPositionUsd, levelSizeUsd: m.levelSizeUsd, levels: m.levels })),
+    limits: {
+      maxDrawdownUsd: cfg.risk.maxDrawdownUsd,
+      minGasBalanceApt: cfg.risk.minGasBalanceApt,
+      maxGasAptPerDay: cfg.risk.maxGasAptPerDay,
+      rebateBps: cfg.rebate.bps,
+      minMakerRatio: cfg.rebate.minMakerRatio,
+      minReplaceIntervalMs: cfg.engine.minReplaceIntervalMs,
+      rampStages: cfg.ramp.enabled ? cfg.ramp.stages : null,
+    },
+  });
+  // A STOP file left over from an earlier run must not end this one; one written after launch is honoured.
+  try {
+    if (existsSync(cfg.engine.stopFile) && statSync(cfg.engine.stopFile).mtimeMs < launched - 1000) {
+      unlinkSync(cfg.engine.stopFile);
+      jsonLogger("warn", "removed a stale STOP file from an earlier run");
+    }
+  } catch {
+    /* best effort */
+  }
+
   const specs = await ex.init(cfg.markets.map((m) => m.name));
   const mm = new MarketMaker(cfg, ex, specs, {
     persist: true,
     killSwitch: () => existsSync(cfg.engine.killSwitchFile),
+    endsAt,
   });
-  let stopping = false;
-  const stop = async (sig: string): Promise<void> => {
-    if (stopping) return;
-    stopping = true;
-    jsonLogger("warn", "shutting down, cancelling quotes", { sig });
-    await mm.haltAll();
-    await ex.close();
-    process.exit(0);
-  };
-  process.on("SIGINT", () => void stop("SIGINT"));
-  process.on("SIGTERM", () => void stop("SIGTERM"));
+  const shutdown = new Shutdown({ haltAll: () => mm.haltAll(), close: () => ex.close(), exit: (c) => process.exit(c), log: jsonLogger });
+  process.on("SIGINT", () => void shutdown.onSignal("SIGINT"));
+  process.on("SIGTERM", () => void shutdown.onSignal("SIGTERM"));
 
-  jsonLogger("info", "market maker started", { markets: cfg.markets.map((m) => m.name), network: cfg.network });
-  for (;;) {
-    const started = Date.now();
-    try {
-      await mm.step(started);
-    } catch (e) {
-      jsonLogger("error", "step failed", { error: String(e) });
-    }
-    if (mm.isHalted) {
-      jsonLogger("error", "halted; exiting");
-      await ex.close();
-      process.exit(2);
-    }
-    const wait = cfg.engine.tickMs - (Date.now() - started);
-    if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+  const res = await runLoop({
+    mm,
+    tickMs: cfg.engine.tickMs,
+    endsAt,
+    stopFile: cfg.engine.stopFile,
+    log: jsonLogger,
+    onEnding: () => shutdown.markEnding(),
+  });
+  // A signal already started cancelling the quotes: let that finish (it exits the process) instead of racing it.
+  const cancelling = shutdown.pending();
+  if (cancelling) {
+    await cancelling;
+    return;
   }
+  await ex.close();
+  if (res.end === "halted") {
+    jsonLogger("error", "halted; exiting");
+    process.exit(2);
+  }
+  process.exit(res.flat?.closed ? 0 : 3);
 }
 
 main().catch((e) => {
