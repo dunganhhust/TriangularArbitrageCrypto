@@ -56,8 +56,8 @@ npx tsx src/cli.ts live config.json --dry-run   # real data, transactions are on
 npx tsx src/cli.ts live config.json             # trades
 ```
 
-Set `"network": "testnet"` first. Stop with Ctrl-C or SIGTERM (cancels quotes) or `touch state/KILL`
-(halts and cancels).
+Set `"network": "testnet"` first. Stop with Ctrl-C or SIGTERM (cancels quotes, keeps positions) or `touch state/KILL`
+(halts and cancels, keeps positions). To stop **and close positions**, see "Run for a set time" below.
 
 ## Dashboard (read-only, localhost)
 
@@ -88,6 +88,52 @@ It has no login and cannot control the bot, so it only listens on `127.0.0.1`. T
 your own machine, tunnel the port: `gcloud compute ssh <vm> --zone <zone> -- -L 8787:localhost:8787`, then
 open `http://localhost:8787` (in Cloud Shell use `-L 8080:localhost:8787` and the Web Preview on port 8080).
 Only the latest run (everything after the last `market maker started` line) is shown.
+
+## Run for a set time, then close everything
+
+```bash
+node --import tsx src/cli.ts live config.json --minutes 120      # ends by itself after 2 hours
+node --import tsx src/cli.ts flatten config.json --dry-run       # what would be closed right now (one attempt, no orders sent)
+node --import tsx src/cli.ts flatten config.json                 # pull quotes and close every position now
+touch state/STOP                                                  # ends a running bot the same way as the deadline
+```
+
+When the deadline passes (or `state/STOP` appears) the bot stops quoting, cancels its resting orders and closes every
+open position with **reduce-only IOC** orders, one market after another. Each retry widens the limit price beyond the touch
+(10, 30, 60, 100, 200 bps) and waits for the position reading to change; a reduce-only order can never open or flip a
+position, so a retry while the reading lags is safe. It then logs `run finished` with `flat: true/false`, removes the STOP
+file and exits (code 0 if flat, 3 if something could not be closed). Things to know:
+
+- Closing costs the **taker** fee (4.5 bps at tier 0) on the position, and counts as taker volume for the half-month
+  maker ratio. On a small position that is cents.
+- A position **below the market's minimum order size** (dust) cannot be closed with a normal order; it is reported as
+  `dust`, not as a failure.
+- If the venue never fills (no depth, an error), the result is `flat: false` with the remaining position and an error in
+  the log; the dashboard shows it in red. Close it by hand in the app.
+- `Ctrl+C` / `SIGTERM` still mean "cancel quotes, keep positions". During a close-out they are ignored once; send twice
+  to abort. A halt (drawdown, fuse limit, `state/KILL`) also keeps positions open, as before.
+- The reduce-only path has only been exercised in the simulator. **Try `flatten` on a tiny position first.**
+
+### Start and End buttons
+
+```bash
+node --import tsx src/cli.ts dashboard config.json --control --env-file /etc/decibel-mm/env
+cat state/dashboard.token        # paste into the "Mã điều khiển" box on the page
+```
+
+With `--control` the page gets a panel: run time in minutes (presets 30 min to 24 h), a dry-run tick, **Bắt đầu**,
+and **Kết thúc & đóng vị thế**, plus a countdown to the deadline. Start launches
+`live config.json --minutes N` as a detached child (`bash` sources the key file for the child only, so the dashboard
+process never holds the private key; the child keeps running if the dashboard restarts). End writes `state/STOP`, so it
+also works for a bot started by hand. Safety of the buttons:
+
+- Off unless you pass `--control`; without it the server rejects every POST.
+- Every request needs the secret in `state/dashboard.token` (created on first use, mode 0600) in an `x-mm-token`
+  header, which another web page cannot send or guess; five wrong tries lock it for a minute.
+- The server only listens on `127.0.0.1`. Anyone who can reach that port through your tunnel **and** read the token file
+  can start and stop trading, so treat the token like a key.
+- Start is refused while a bot is running (seen via its pid file or a fresh `live.json`), while `state/KILL` exists, or
+  if the key file or config is missing or invalid.
 
 ## Several markets
 

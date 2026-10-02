@@ -11,7 +11,7 @@ export interface LogLine {
   [k: string]: unknown;
 }
 
-export type RunState = "no-data" | "running" | "stale" | "stopped" | "halted";
+export type RunState = "no-data" | "running" | "finishing" | "stale" | "stopped" | "halted";
 
 export interface Alert {
   level: "error" | "warn" | "info";
@@ -63,6 +63,12 @@ export function lastRun(lines: LogLine[]): LogLine[] {
   for (let i = lines.length - 1; i >= 0; i--) if (lines[i]!.msg === "market maker started") return lines.slice(i);
   return lines;
 }
+
+const numOnly = (x: unknown): Record<string, number> => {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(rec(x))) if (typeof v === "number" && Number.isFinite(v)) out[k] = v;
+  return out;
+};
 
 const num = (x: unknown): number | null => (typeof x === "number" && Number.isFinite(x) ? x : null);
 const rec = (x: unknown): Record<string, unknown> => (x && typeof x === "object" && !Array.isArray(x) ? (x as Record<string, unknown>) : {});
@@ -142,6 +148,11 @@ export interface DashboardData {
     ageSec: number | null;
     uptimeSec: number | null;
     liveSeen: boolean;
+    /** Planned end (epoch ms) when the run was started with a duration. */
+    endsAt: number | null;
+    remainingSec: number | null;
+    /** How the run ended, once it has: the reason and whether every position was closed. */
+    finish: { reason: string; closed: boolean; residual: Record<string, number>; dust: Record<string, number> } | null;
   };
   alerts: Alert[];
   config: { marketCfg: unknown[]; limits: Record<string, unknown> };
@@ -212,6 +223,8 @@ export interface DashboardData {
     aptRunwayHours: number | null;
     aptUsd: number;
   };
+  /** Filled in by the server: whether the Start/End buttons exist and the bot's process state. */
+  control?: unknown;
   /** Filled in by the server. */
   aptPrice?: { usd: number; source: string; ts: number; ageSec: number; stale: boolean } | null;
 }
@@ -256,8 +269,19 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
   const hasActivity = Number.isFinite(lastActivity);
   const haltLine = [...run].reverse().find((l) => l.level === "error" && l.msg === "HALT") ?? null;
   const stopped = run.some((l) => l.msg === STOP_MSG);
+  const endingLine = run.find((l) => l.msg.startsWith("run ending")) ?? null;
+  const finishedLine = [...run].reverse().find((l) => l.msg === "run finished") ?? null;
+  const finish = finishedLine
+    ? {
+        reason: String(finishedLine.reason ?? ""),
+        closed: finishedLine.flat === true,
+        residual: numOnly(finishedLine.residual),
+        dust: numOnly(finishedLine.dust),
+      }
+    : null;
   const ageMs = hasActivity ? o.now - lastActivity : null;
   const staleAfter = liveTs !== null ? (o.liveStaleMs ?? 15_000) : o.staleMs;
+  const reasonText = (r: string): string => (r === "deadline" ? "hết giờ" : r === "stop" ? "bạn bấm Kết thúc" : r);
   let state: RunState;
   let detail: string;
   if (!hasActivity) {
@@ -266,16 +290,27 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
   } else if (haltLine || run.some((l) => l.msg === "halted; exiting")) {
     state = "halted";
     detail = `Bot tự dừng: ${String(haltLine?.reason ?? "xem Sự kiện")}`;
+  } else if (finish) {
+    state = "stopped";
+    detail = finish.closed
+      ? `Đã kết thúc (${reasonText(finish.reason)}): toàn bộ vị thế đã đóng.`
+      : `Đã kết thúc (${reasonText(finish.reason)}) nhưng CÒN vị thế chưa đóng: ${JSON.stringify(finish.residual)}`;
   } else if (stopped) {
     state = "stopped";
-    detail = "Bot đã dừng sạch (đã hủy lệnh).";
+    detail = "Bot đã dừng sạch (đã hủy lệnh, vị thế giữ nguyên).";
   } else if (ageMs !== null && ageMs > staleAfter) {
     state = "stale";
-    detail = `Không có tín hiệu mới trong ${Math.round(ageMs / 1000)} giây: tiến trình có thể đã chết.`;
+    detail = `Không có tín hiệu mới trong ${Math.round(ageMs / 1000)} giây: tiến trình có thể đã chết${endingLine ? " khi đang đóng vị thế" : ""}.`;
+  } else if (endingLine || live?.phase === "flattening") {
+    state = "finishing";
+    detail = "Đang hủy lệnh và đóng toàn bộ vị thế.";
   } else {
     state = "running";
     detail = dryRun ? "Đang chạy thử (không gửi giao dịch)." : "Đang chạy thật.";
   }
+  const endsAtMs = num(live?.endsAt) ?? (typeof start?.endsAt === "string" ? Date.parse(start.endsAt) : null);
+  const endsAt = endsAtMs !== null && Number.isFinite(endsAtMs) ? endsAtMs : null;
+  const remainingSec = endsAt !== null && (state === "running" || state === "finishing") ? Math.max(0, Math.round((endsAt - o.now) / 1000)) : null;
 
   // --- window ----------------------------------------------------------------------------------
   const end = hasActivity ? lastActivity : o.now;
@@ -513,6 +548,11 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
       level: "error",
       text: `${detail} Nếu bot đã chết, lệnh có thể VẪN nằm trên chuỗi: vào app Decibel > Open Orders để hủy.`,
     });
+  if (state === "finishing") alerts.push({ level: "info", text: "Đang hủy lệnh và đóng toàn bộ vị thế. Đừng tắt bot hay máy ảo lúc này." });
+  if (finish && !finish.closed)
+    alerts.push({ level: "error", text: `Bot đã kết thúc nhưng còn vị thế chưa đóng: ${JSON.stringify(finish.residual)}. Mở Positions trong app Decibel và đóng thủ công.` });
+  if (finish && Object.keys(finish.dust).length)
+    alerts.push({ level: "warn", text: `Còn vị thế quá nhỏ để đóng bằng lệnh thường (dưới lệnh tối thiểu): ${JSON.stringify(finish.dust)}.` });
   if (state === "halted") alerts.push({ level: "error", text: `${detail}. Kiểm tra Open Orders trong app xem còn lệnh nào không.` });
   if (o.killFile) alerts.push({ level: "warn", text: "File state/KILL đang tồn tại: bot sẽ dừng và hủy lệnh (xóa file nếu muốn chạy lại)." });
   if (state === "running" && latest) {
@@ -560,6 +600,9 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
       ageSec: ageMs !== null ? Math.round(ageMs / 1000) : null,
       uptimeSec: startedAt !== null && hasActivity ? Math.round(((state === "running" ? o.now : lastActivity) - startedAt) / 1000) : null,
       liveSeen: liveTs !== null,
+      endsAt,
+      remainingSec,
+      finish,
     },
     alerts,
     config: { marketCfg, limits },

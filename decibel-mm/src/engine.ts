@@ -67,7 +67,25 @@ export interface EngineOpts {
   persist?: boolean;
   /** Source of randomness in [0,1) for refresh-interval jitter; injectable for tests. */
   rng?: () => number;
+  /** Planned end of the run (epoch ms), shown in the live snapshot. The runner enforces it. */
+  endsAt?: number | null;
+  /** Pause between position polls while closing out; injectable so tests need not wait. */
+  sleep?: (ms: number) => Promise<void>;
 }
+
+export interface FlattenResult {
+  /** True when no market has a position left that the venue would let us close. */
+  closed: boolean;
+  /** Positions at or above the market minimum that are still open (base units, signed). */
+  residual: Record<string, number>;
+  /** Positions below the market minimum order size: too small to close with a normal order. */
+  dust: Record<string, number>;
+  /** Reduce-only orders sent. */
+  orders: number;
+}
+
+/** Limit-price slack beyond the touch for each successive close-out attempt. */
+const FLATTEN_SLIPPAGE_BPS = [10, 30, 60, 100, 200];
 
 const utcDay = (ts: number): string => new Date(ts).toISOString().slice(0, 10);
 
@@ -82,6 +100,7 @@ export class MarketMaker {
   private lastStatus = 0;
   private lastLive = 0;
   private liveWarned = false;
+  private phase: "running" | "flattening" | "done" = "running";
   private lastPointsPoll = 0;
   private lastSave = 0;
   private halted = false;
@@ -459,6 +478,7 @@ export class MarketMaker {
       streakSecured: s.streakSecured,
       rampStage: this.ramp.stage,
       sizeMult: this.ramp.mult,
+      phase: this.phase,
       takerFills: this.takerFills,
       cycle: s.cycleKey,
       cycleMakerRatio: s.cycleMakerRatio === null ? null : round(s.cycleMakerRatio, 3),
@@ -510,7 +530,7 @@ export class MarketMaker {
     try {
       mkdirSync(dirname(file), { recursive: true });
       const tmp = `${file}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ t: new Date().toISOString(), now, pid: process.pid, ...this.statusFields(now), markets: this.marketViews() }));
+      writeFileSync(tmp, JSON.stringify({ t: new Date().toISOString(), now, pid: process.pid, endsAt: this.opts.endsAt ?? null, ...this.statusFields(now), markets: this.marketViews() }));
       renameSync(tmp, file);
     } catch (err) {
       if (!this.liveWarned) {
@@ -592,6 +612,73 @@ export class MarketMaker {
     } catch {
       /* no prior state */
     }
+  }
+
+  /**
+   * Stop quoting, pull every resting order and close every open position with reduce-only IOC orders,
+   * widening the price limit on each retry. A reduce-only order can never open or flip a position, so
+   * repeating an attempt while the position reading lags is safe. Never throws: the outcome is returned.
+   */
+  async flattenAll(o: { attempts?: number } = {}): Promise<FlattenResult> {
+    this.halted = true; // step() stops placing quotes
+    this.phase = "flattening";
+    const sleep = this.opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+    await this.cancelAll();
+    let orders = 0;
+
+    const open = () => {
+      const out: { name: string; st: MarketState; pos: number; size: number }[] = [];
+      for (const [name, st] of this.states) {
+        const pos = this.ex.getPosition(name);
+        const size = roundDownToStep(Math.abs(pos), st.spec.lotSize);
+        if (size >= st.spec.minSize) out.push({ name, st, pos, size });
+      }
+      return out;
+    };
+
+    const attempts = Math.min(o.attempts ?? FLATTEN_SLIPPAGE_BPS.length, FLATTEN_SLIPPAGE_BPS.length);
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      const todo = open();
+      if (todo.length === 0) break;
+      const slip = FLATTEN_SLIPPAGE_BPS[attempt]! / 1e4;
+      this.log("info", "flatten: attempt", { attempt: attempt + 1, slippageBps: FLATTEN_SLIPPAGE_BPS[attempt], positions: Object.fromEntries(todo.map((t) => [t.name, t.pos])) });
+      for (const { name, pos, size } of todo) {
+        const book = this.ex.getBook(name);
+        const touch = pos > 0 ? book?.bids[0]?.price : book?.asks[0]?.price;
+        const ref = touch ?? this.lastMid.get(name) ?? this.ex.getPrice(name)?.mid;
+        if (!ref || ref <= 0) {
+          this.log("error", "flatten: no price for market, cannot close", { market: name });
+          continue;
+        }
+        const side = pos > 0 ? "sell" : "buy";
+        const limitPrice = side === "sell" ? ref * (1 - slip) : ref * (1 + slip);
+        this.log("info", "flatten: order", { market: name, side, size: round(size, 8), ref, limitPrice: round(limitPrice, 4) });
+        try {
+          if (await this.ex.reduce({ market: name, side, size, limitPrice })) orders++;
+        } catch (e) {
+          this.log("error", "flatten: order failed", { market: name, error: String(e) });
+        }
+      }
+      // Positions are read on a timer, so give the venue a few seconds to show the result.
+      for (let w = 0; w < 16 && open().length > 0; w++) {
+        await sleep(500);
+        if (this.opts.persist && this.cfg.engine.liveFile) this.writeLive(Date.now());
+      }
+    }
+
+    const residual: Record<string, number> = {};
+    const dust: Record<string, number> = {};
+    for (const [name, st] of this.states) {
+      const pos = this.ex.getPosition(name);
+      if (Math.abs(pos) < 1e-12) continue;
+      if (roundDownToStep(Math.abs(pos), st.spec.lotSize) >= st.spec.minSize) residual[name] = round(pos, 8);
+      else dust[name] = round(pos, 8);
+    }
+    const closed = Object.keys(residual).length === 0;
+    this.phase = "done";
+    if (this.opts.persist && this.cfg.engine.liveFile) this.writeLive(Date.now());
+    this.log(closed ? "info" : "error", closed ? "flatten: done" : "flatten: INCOMPLETE, positions remain", { residual, dust, orders });
+    return { closed, residual, dust, orders };
   }
 
   async haltAll(): Promise<void> {

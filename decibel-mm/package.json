@@ -10,7 +10,8 @@
     "paper": "tsx src/cli.ts paper",
     "check": "tsx src/cli.ts check",
     "live": "tsx src/cli.ts live",
-    "dashboard": "tsx src/cli.ts dashboard"
+    "dashboard": "tsx src/cli.ts dashboard",
+    "flatten": "tsx src/cli.ts flatten"
   },
   "dependencies": {
     "@aptos-labs/ts-sdk": "^7.1.0",

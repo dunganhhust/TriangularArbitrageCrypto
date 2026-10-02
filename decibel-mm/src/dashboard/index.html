@@ -81,6 +81,13 @@
   a { color: var(--accent); }
   footer { color: var(--muted); font-size: 12px; margin-top: 8px; }
   .hidden { display: none !important; }
+  .b-finishing { background: var(--warn-bg); color: var(--warn); }
+  .ctl { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 8px; }
+  .btn { border: 0; border-radius: 8px; padding: 8px 16px; font: inherit; font-weight: 700; cursor: pointer; color: #fff; }
+  .btn.go { background: var(--good); } .btn.stop { background: var(--bad); }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+  input[type=password] { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); font: inherit; width: 230px; }
+  #ctlMsg { font-weight: 600; }
 </style>
 </head>
 <body>
@@ -111,6 +118,25 @@
     <span id="aptManualBox" class="hidden"><input id="aptManual" type="number" step="0.01" min="0.01" value="0.8"></span>
     <span class="spacer"></span>
     <span id="livechip" class="muted"></span>
+  </div>
+
+  <div id="control" class="card hidden" style="margin-bottom:12px">
+    <h2>Điều khiển phiên chạy</h2>
+    <div id="ctlStatus"></div>
+    <div class="ctl">
+      <label class="inline">Thời gian chạy <input id="ctlMin" type="number" min="1" max="10080" step="1" value="120"> phút</label>
+      <span class="seg" id="ctlPresets">
+        <button data-m="30">30 phút</button><button data-m="60">1 giờ</button><button data-m="120">2 giờ</button><button data-m="360">6 giờ</button><button data-m="1440">24 giờ</button>
+      </span>
+      <label class="inline"><input id="ctlDry" type="checkbox"> chạy thử (không gửi giao dịch)</label>
+      <button id="btnStart" class="btn go" disabled>▶ Bắt đầu</button>
+      <button id="btnStop" class="btn stop" disabled>■ Kết thúc &amp; đóng vị thế</button>
+    </div>
+    <div class="ctl">
+      <label class="inline">Mã điều khiển <input id="ctlToken" type="password" autocomplete="off" placeholder="dán nội dung file state/dashboard.token"></label>
+      <span id="ctlMsg"></span>
+    </div>
+    <div class="sub">Hết giờ, hoặc khi bấm Kết thúc, bot hủy mọi lệnh, đóng toàn bộ vị thế bằng lệnh thị trường (reduce-only, mở rộng giá giới hạn dần qua tối đa 5 lần thử) rồi thoát. Việc đóng vị thế trả phí taker. Dừng khẩn không đóng vị thế: tạo file <span class="mono">state/KILL</span>.</div>
   </div>
 
   <div id="alerts" class="alerts"></div>
@@ -161,7 +187,7 @@ function dur(sec) {
   const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
   return h ? `${h}g ${m}p` : m ? `${m}p ${s}s` : `${s}s`;
 }
-const STATE_TXT = { "no-data": "CHƯA CÓ LOG", running: "ĐANG CHẠY", stale: "MẤT TÍN HIỆU", stopped: "ĐÃ DỪNG", halted: "BOT TỰ DỪNG" };
+const STATE_TXT = { "no-data": "CHƯA CÓ LOG", running: "ĐANG CHẠY", finishing: "ĐANG ĐÓNG VỊ THẾ", stale: "MẤT TÍN HIỆU", stopped: "ĐÃ DỪNG", halted: "BOT TỰ DỪNG" };
 const MCOL = ["--m0", "--m1", "--m2", "--m3"];
 
 // ---- settings (remembered in this browser only) --------------------------------------------
@@ -213,7 +239,9 @@ function render(d) {
   $("state").title = r.detail;
   $("mode").className = "badge " + (r.dryRun ? "b-dry" : "b-live");
   $("mode").textContent = r.state === "no-data" ? "" : r.dryRun ? "THỬ (không gửi tx)" : "THẬT";
-  $("meta").textContent = r.state === "no-data" ? r.detail : `${r.network || ""} · ${(r.markets || []).join(", ")} · chạy ${dur(r.uptimeSec)} · tín hiệu cuối ${dur(r.ageSec)} trước`;
+  const left = isNum(r.remainingSec) ? ` · còn ${dur(r.remainingSec)} (hết giờ lúc ${hhmmss(r.endsAt)})` : "";
+  $("meta").textContent = r.state === "no-data" ? r.detail : `${r.network || ""} · ${(r.markets || []).join(", ")} · chạy ${dur(r.uptimeSec)}${left} · tín hiệu cuối ${dur(r.ageSec)} trước`;
+  $("meta").title = r.detail;
   $("clock").textContent = new Date(d.generatedAt).toLocaleTimeString("vi-VN", { hour12: false });
   $("livechip").innerHTML = r.liveSeen
     ? '<span class="dot ok"></span>trực tiếp · cập nhật mỗi giây'
@@ -341,6 +369,83 @@ function render(d) {
   setHTML("l-vol", legend(vol));
   const lm = isNum(lim.minGasBalanceApt) ? lim.minGasBalanceApt : null;
   drawChart("c-apt", [{ xs: d.series.t, ys: d.series.aptBalance, color: "--info", label: "APT" }], { base: lm, dec: 4, span });
+  renderControl(d);
+}
+
+// ---- Start / End controls (only when the dashboard was started with --control) -----------------
+const CTL = { busy: false, msg: "", msgCls: "" };
+let TOKEN = "";
+try { TOKEN = localStorage.getItem("mm.token") || ""; } catch (e) { /* ignore */ }
+$("ctlToken").value = TOKEN;
+$("ctlMin").value = S.ctlMin || 120;
+$("ctlDry").checked = !!S.ctlDry;
+$("ctlToken").addEventListener("input", () => {
+  TOKEN = $("ctlToken").value.trim();
+  try { localStorage.setItem("mm.token", TOKEN); } catch (e) { /* ignore */ }
+  if (lastData) renderControl(lastData);
+});
+$("ctlMin").addEventListener("change", () => { S.ctlMin = Math.min(10080, Math.max(1, Math.round(Number($("ctlMin").value) || 120))); $("ctlMin").value = S.ctlMin; save(); });
+$("ctlDry").addEventListener("change", () => { S.ctlDry = $("ctlDry").checked; save(); });
+$("ctlPresets").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button");
+  if (!b) return;
+  S.ctlMin = Number(b.dataset.m); $("ctlMin").value = S.ctlMin; save();
+});
+function say(text, cls) { CTL.msg = text; CTL.msgCls = cls || ""; const m = $("ctlMsg"); m.textContent = text; m.className = cls || ""; }
+async function post(path, body) {
+  CTL.busy = true; if (lastData) renderControl(lastData);
+  try {
+    const res = await fetch(path, { method: "POST", headers: { "content-type": "application/json", "x-mm-token": TOKEN }, body: JSON.stringify(body || {}) });
+    const j = await res.json().catch(() => ({ ok: false, error: "Phản hồi không hợp lệ (HTTP " + res.status + ")" }));
+    return j;
+  } catch (err) {
+    return { ok: false, error: "Không gọi được dashboard server: " + (err.message || err) };
+  } finally {
+    CTL.busy = false;
+    refresh();
+  }
+}
+$("btnStart").addEventListener("click", async () => {
+  const c = lastData && lastData.control;
+  const minutes = Math.min(10080, Math.max(1, Math.round(Number($("ctlMin").value) || 0)));
+  if (!minutes) return say("Nhập thời gian chạy (phút).", "bad");
+  const dry = $("ctlDry").checked;
+  const cfg = c && c.config && c.config.markets ? c.config.markets.map((m) => `${m.name} (vị thế tối đa ${m.maxPositionUsd} USD, mỗi mức ${m.levelSizeUsd} USD)`).join("\n  ") : "";
+  const ok = confirm(`${dry ? "CHẠY THỬ (không gửi giao dịch)" : "CHẠY THẬT trên " + (c && c.config ? c.config.network : "mainnet")} trong ${minutes} phút.\n\n  ${cfg}\n\nHết giờ bot sẽ hủy lệnh và đóng toàn bộ vị thế. Tiếp tục?`);
+  if (!ok) return;
+  say("Đang khởi động bot…", "muted");
+  const j = await post("/api/control/start", { minutes, dryRun: dry });
+  say(j.ok ? `Đã khởi động (PID ${j.pid}). Chờ bot ghi log đầu tiên…` : j.error + (j.detail ? "\n" + j.detail : ""), j.ok ? "good" : "bad");
+});
+$("btnStop").addEventListener("click", async () => {
+  if (!confirm("Kết thúc phiên: bot sẽ hủy mọi lệnh và ĐÓNG TOÀN BỘ VỊ THẾ bằng lệnh thị trường (trả phí taker), rồi thoát.\n\nTiếp tục?")) return;
+  say("Đang gửi yêu cầu kết thúc…", "muted");
+  const j = await post("/api/control/stop", {});
+  say(j.ok ? "Đã yêu cầu kết thúc. Bot đang đóng vị thế…" : j.error, j.ok ? "good" : "bad");
+});
+function renderControl(d) {
+  const c = d.control || { enabled: false };
+  $("control").classList.toggle("hidden", !c.enabled);
+  if (!c.enabled) return;
+  const r = d.run, cf = c.config || {};
+  let st;
+  if (c.running) {
+    const who = c.startedBy === "dashboard" ? "bắt đầu từ dashboard" : "bắt đầu bên ngoài dashboard";
+    st = `<b class="good">Bot đang chạy</b> (PID ${c.pid ?? "?"}, ${who})` +
+      (isNum(r.remainingSec) ? ` · còn <b>${dur(r.remainingSec)}</b>, hết giờ lúc ${hhmmss(r.endsAt)}` : " · không đặt giờ kết thúc") +
+      (c.stopRequested || r.state === "finishing" ? ' · <b class="warn">đang kết thúc và đóng vị thế</b>' : "");
+  } else {
+    st = '<b>Bot không chạy.</b>' + (r.finish ? ` Phiên trước ${r.finish.closed ? "đã đóng toàn bộ vị thế" : '<b class="bad">còn vị thế chưa đóng</b>'}.` : "");
+  }
+  const mk = cf.markets ? "Sẽ chạy: " + cf.network + " · " + cf.markets.map((m) => `${esc(m.name)} (tối đa ${m.maxPositionUsd} USD, mỗi mức ${m.levelSizeUsd})`).join(" · ") + ` · làm mới ${Math.round((cf.minReplaceIntervalMs || 0) / 60000 * 10) / 10} phút` : cf.error ? `<span class="bad">Cấu hình lỗi: ${esc(cf.error)}</span>` : "";
+  const warn = (c.killFile ? '<br><span class="bad">File state/KILL đang tồn tại: không thể bắt đầu cho đến khi xóa nó.</span>' : "") +
+    (!c.envFileOk ? '<br><span class="bad">Không thấy file khóa (--env-file): không thể bắt đầu từ dashboard.</span>' : "");
+  setHTML("ctlStatus", `${st}<div class="sub">${mk}${warn}</div>`);
+  const hasTok = TOKEN.length >= 32;
+  $("btnStart").disabled = CTL.busy || c.running || c.killFile || !c.envFileOk || !hasTok || !!cf.error;
+  $("btnStop").disabled = CTL.busy || !c.running || c.stopRequested || r.state === "finishing" || !hasTok;
+  $("btnStart").title = !hasTok ? "Nhập mã điều khiển trước" : "";
+  if (!hasTok && !CTL.msg) say("Dán mã từ file state/dashboard.token vào ô bên trên để mở khóa các nút.", "muted");
 }
 
 function legend(series) {

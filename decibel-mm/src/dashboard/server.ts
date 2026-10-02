@@ -3,6 +3,8 @@ import type { Server } from "node:http";
 import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { analyze } from "./analyze.js";
+import { BotControl } from "./control.js";
+import type { ControlOpts } from "./control.js";
 import { PriceFeed } from "./price.js";
 import { LiveFile, LogTail } from "./tail.js";
 
@@ -14,6 +16,10 @@ export interface DashboardOpts {
   /** live.json written by the bot every second; "" = not used. */
   liveFile?: string;
   killFile: string;
+  /** Creating this file asks the bot to end the run and close every position. */
+  stopFile?: string;
+  /** Start / End buttons. null or omitted = the page is strictly read-only. */
+  control?: Omit<ControlOpts, "spawnFn" | "isAlive" | "now" | "settleMs"> & Partial<Pick<ControlOpts, "spawnFn" | "isAlive" | "now" | "settleMs">> | null;
   /** Without a live snapshot a run is "stale" after this long with no log line. */
   staleMs?: number;
   /** How much of the log's tail is read on first load (later reads are incremental). */
@@ -35,6 +41,7 @@ export function startDashboard(o: DashboardOpts): Promise<Server> {
   const liveFile = new LiveFile(o.liveFile ?? "");
   const feed = o.priceFeed === undefined ? new PriceFeed() : o.priceFeed;
   feed?.start();
+  const control = o.control ? new BotControl(o.control, { stopFile: o.stopFile ?? "state/STOP", killFile: o.killFile }) : null;
 
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
@@ -42,6 +49,40 @@ export function startDashboard(o: DashboardOpts): Promise<Server> {
       res.writeHead(code, { "content-type": type, "cache-control": "no-store", "x-content-type-options": "nosniff" });
       res.end(body);
     };
+    if (req.method === "POST" && url.pathname.startsWith("/api/control/")) {
+      if (!control) return send(404, "application/json", JSON.stringify({ ok: false, error: "Điều khiển đang tắt: chạy dashboard với --control." }));
+      const auth = control.authorize(typeof req.headers["x-mm-token"] === "string" ? req.headers["x-mm-token"] : undefined);
+      if (!auth.ok) return send(auth.code, "application/json", JSON.stringify(auth));
+      let raw = "";
+      let tooBig = false;
+      req.on("data", (c: Buffer) => {
+        raw += c.toString("utf8");
+        if (raw.length > 4096) {
+          tooBig = true;
+          req.destroy();
+        }
+      });
+      req.on("end", () => {
+        if (tooBig) return;
+        void (async () => {
+          try {
+            let body: unknown = {};
+            try {
+              body = raw ? JSON.parse(raw) : {};
+            } catch {
+              return send(400, "application/json", JSON.stringify({ ok: false, error: "Nội dung không phải JSON." }));
+            }
+            const live = liveFile.read();
+            const r = url.pathname === "/api/control/start" ? await control.start(body, live) : url.pathname === "/api/control/stop" ? control.stop(live) : null;
+            if (!r) return send(404, "application/json", JSON.stringify({ ok: false, error: "not found" }));
+            return send(r.ok ? 200 : r.code, "application/json", JSON.stringify(r));
+          } catch (e) {
+            return send(500, "application/json", JSON.stringify({ ok: false, error: String(e) }));
+          }
+        })();
+      });
+      return;
+    }
     if (req.method !== "GET") return send(405, "text/plain", "method not allowed");
     try {
       if (url.pathname === "/") return send(200, "text/html; charset=utf-8", readFileSync(PAGE, "utf8"));
@@ -65,6 +106,7 @@ export function startDashboard(o: DashboardOpts): Promise<Server> {
           live: liveFile.read(),
         });
         data.aptPrice = px;
+        data.control = control ? control.status(liveFile.read()) : { enabled: false };
         return send(200, "application/json", JSON.stringify(data));
       }
       return send(404, "text/plain", "not found");

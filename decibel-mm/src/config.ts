@@ -44,6 +44,8 @@ export const configSchema = z.object({
       volWindowMs: z.number().int().positive().default(60_000),
       stateFile: z.string().default("state/state.json"),
       killSwitchFile: z.string().default("state/KILL"),
+      /** Creating this file ends the run gracefully: pull quotes, close every position, exit. */
+      stopFile: z.string().default("state/STOP"),
       pointsLogFile: z.string().default("data/points_log.csv"),
       /** Every log line of a live run is also appended here; the dashboard reads it. "" = off. */
       runLogFile: z.string().default("data/run.log"),
