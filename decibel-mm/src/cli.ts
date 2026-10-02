@@ -33,6 +33,7 @@ async function main(): Promise<void> {
     network: cfg.network,
     env,
     dryRun: process.argv.includes("--dry-run"),
+    encrypted: cfg.execution.encrypted,
     priceUnits: cfg.live.priceUnits,
     sizeUnits: cfg.live.sizeUnits,
     log: (msg, extra) => jsonLogger("info", msg, extra),

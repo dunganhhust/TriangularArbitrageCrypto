@@ -2,8 +2,18 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } fr
 import { dirname } from "node:path";
 import type { Config, MarketConfig } from "./config.js";
 import type { Exchange } from "./exchange/exchange.js";
+import { VolatilityFuse } from "./strategy/fuse.js";
 import { PointsController } from "./strategy/points.js";
-import { buildLadder, isLadderThreatened, microprice, needsReplace, roundDownToStep, stripOwn } from "./strategy/quoter.js";
+import { RampController } from "./strategy/ramp.js";
+import {
+  buildLadder,
+  isLadderThreatened,
+  microprice,
+  needsReplace,
+  roundDownToStep,
+  stripOwn,
+  topDriftBps,
+} from "./strategy/quoter.js";
 import type { QuoteParams } from "./strategy/quoter.js";
 import { assess } from "./strategy/risk.js";
 import type { RiskConfig } from "./strategy/risk.js";
@@ -20,11 +30,15 @@ interface MarketState {
   cfg: MarketConfig;
   live: Ladder | null;
   lastReplaceAt: number;
+  /** Jittered minimum gap before the next scheduled (non-urgent) replace. */
+  nextInterval: number;
   dirty: boolean;
   samples: { ts: number; mid: number }[];
   failures: number;
   cooldownUntil: number;
   lastPause: string | null;
+  fuse: VolatilityFuse;
+  warnedTooSmall: boolean;
 }
 
 export interface EngineOpts {
@@ -33,19 +47,30 @@ export interface EngineOpts {
   log?: Logger;
   /** Persist/restore the daily counters across restarts. */
   persist?: boolean;
+  /** Source of randomness in [0,1) for refresh-interval jitter; injectable for tests. */
+  rng?: () => number;
 }
+
+const utcDay = (ts: number): string => new Date(ts).toISOString().slice(0, 10);
 
 export class MarketMaker {
   readonly points: PointsController;
+  readonly ramp: RampController;
   private readonly states = new Map<string, MarketState>();
   private readonly risk: RiskConfig;
   private readonly log: Logger;
+  private readonly rng: () => number;
   private startEquity: number | null = null;
   private lastStatus = 0;
   private lastPointsPoll = 0;
   private lastSave = 0;
   private halted = false;
   private lastMid = new Map<string, number>();
+  private fillCount = 0;
+  private tripCount = 0;
+  private gasDay = "";
+  private gasDayBase = 0;
+  private gasPausedDay: string | null = null;
 
   constructor(
     private readonly cfg: Config,
@@ -54,7 +79,9 @@ export class MarketMaker {
     private readonly opts: EngineOpts = {},
   ) {
     this.log = opts.log ?? jsonLogger;
+    this.rng = opts.rng ?? Math.random;
     this.points = new PointsController(cfg.points);
+    this.ramp = new RampController(cfg.ramp);
     this.risk = {
       staleBookMs: cfg.risk.staleBookMs,
       maxOracleDevBps: cfg.risk.maxOracleDevBps,
@@ -73,11 +100,14 @@ export class MarketMaker {
         cfg: mc,
         live: null,
         lastReplaceAt: 0,
+        nextInterval: cfg.engine.minReplaceIntervalMs,
         dirty: true,
         samples: [],
         failures: 0,
         cooldownUntil: 0,
         lastPause: null,
+        fuse: new VolatilityFuse(cfg.fuse),
+        warnedTooSmall: false,
       });
     }
     if (opts.persist) this.restore();
@@ -95,10 +125,13 @@ export class MarketMaker {
       const st = this.states.get(f.market);
       if (!st) continue;
       st.dirty = true; // resting sizes changed; re-send the full ladder
+      this.fillCount++;
       this.points.onFill(f, this.lastMid.get(f.market) ?? f.price);
       this.log("info", "fill", { market: f.market, side: f.side, px: f.price, sz: f.size, maker: f.isMaker, fee: round(f.feeUsd, 4) });
     }
     this.points.tick(now, (m) => this.lastMid.get(m));
+    await this.checkToxicFlow(now);
+    if (this.halted) return;
 
     const acct = this.ex.getAccount();
     if (acct && this.startEquity === null) this.startEquity = acct.equityUsd;
@@ -106,6 +139,16 @@ export class MarketMaker {
     const gas = this.ex.getGas?.() ?? null;
     if (gas && gas.balanceApt !== null && gas.balanceApt < this.cfg.risk.minGasBalanceApt) {
       this.log("error", "HALT", { reason: "signer APT balance below reserve", balanceApt: gas.balanceApt, minGasBalanceApt: this.cfg.risk.minGasBalanceApt });
+      await this.haltAll();
+      return;
+    }
+    if (gas && (await this.gasBudgetExceeded(now, gas.gasApt))) return;
+
+    const ramp = this.ramp.update(now, acct?.equityUsd ?? null, { fills: this.fillCount, trips: this.tripCount });
+    if (ramp.kind === "advanced") this.log("info", "ramp: stage up", { from: ramp.from, to: ramp.to, sizeMult: this.ramp.mult });
+    if (ramp.kind === "demoted") this.log("warn", "ramp: stage down after loss", { from: ramp.from, to: ramp.to, lossPct: round(ramp.lossPct, 2), sizeMult: this.ramp.mult });
+    if (ramp.kind === "exhausted") {
+      this.log("error", "HALT", { reason: `loss ${round(ramp.lossPct, 2)}% at the smallest ramp stage` });
       await this.haltAll();
       return;
     }
@@ -118,6 +161,44 @@ export class MarketMaker {
     }
 
     await this.housekeeping(now);
+  }
+
+  /** Pull quotes for the rest of the UTC day once the gas budget is spent. */
+  private async gasBudgetExceeded(now: number, gasApt: number): Promise<boolean> {
+    const day = utcDay(now);
+    if (day !== this.gasDay) {
+      this.gasDay = day;
+      this.gasDayBase = gasApt;
+      this.gasPausedDay = null;
+    }
+    if (this.gasPausedDay === day) return true;
+    const spent = gasApt - this.gasDayBase;
+    if (spent < this.cfg.risk.maxGasAptPerDay) return false;
+    this.gasPausedDay = day;
+    this.log("error", "gas budget for the day spent; pulling quotes until tomorrow (UTC)", { spentApt: round(spent, 6), maxGasAptPerDay: this.cfg.risk.maxGasAptPerDay });
+    await this.cancelAll();
+    return true;
+  }
+
+  /** Recent fills keep being picked off: treat it as a toxic regime and trip every fuse. */
+  private async checkToxicFlow(now: number): Promise<void> {
+    const f = this.cfg.fuse;
+    if (!f.enabled) return;
+    const avg = this.points.toxicity(f.toxicFills);
+    if (avg === null || avg > -f.toxicMarkoutBps) return;
+    this.points.resetToxicity();
+    for (const st of this.states.values()) {
+      const s = st.fuse.trip(now, `toxic flow: last ${f.toxicFills} fills averaged ${round(avg, 1)} bps`);
+      if (s.state === "halt") {
+        this.log("error", "HALT", { market: st.spec.name, reason: s.reason });
+        await this.haltAll();
+        return;
+      }
+      if (s.state === "tripped" && s.justTripped) {
+        this.tripCount++;
+        this.log("warn", "FUSE tripped: pulling quotes", { market: st.spec.name, reason: s.reason, pauseSec: Math.round((s.until - now) / 1000) });
+      }
+    }
   }
 
   private async stepMarket(st: MarketState, now: number, mult: number, equity: number | null): Promise<void> {
@@ -133,13 +214,43 @@ export class MarketMaker {
       while (st.samples.length > 2 && st.samples[0]!.ts < cutoff) st.samples.shift();
     }
 
+    // Circuit breaker first: it can pull quotes even when ordinary risk checks are happy.
+    const bb = rawBook?.bids[0]?.price;
+    const ba = rawBook?.asks[0]?.price;
+    const mid = bb !== undefined && ba !== undefined ? (bb + ba) / 2 : null;
+    const fz = st.fuse.observe(now, {
+      fair,
+      spreadBps: mid !== null && bb !== undefined && ba !== undefined ? ((ba - bb) / mid) * 1e4 : null,
+      oracleDevBps: mid !== null && price && price.oracle > 0 ? (Math.abs(mid - price.oracle) / price.oracle) * 1e4 : null,
+    });
+    if (fz.state === "halt") {
+      this.log("error", "HALT", { market: name, reason: fz.reason });
+      await this.haltAll();
+      return;
+    }
+    if (fz.state === "tripped") {
+      if (fz.justTripped) {
+        this.tripCount++;
+        this.log("warn", "FUSE tripped: pulling quotes", { market: name, reason: fz.reason, pauseSec: Math.round((fz.until - now) / 1000) });
+      }
+      if (st.live) {
+        await this.ex.cancelAll(name);
+        st.live = null;
+      }
+      st.dirty = true;
+      return;
+    }
+    const widen = fz.state === "recovering" ? fz.widen : 1;
+
+    const scale = this.ramp.mult;
+    const maxPos = st.cfg.maxPositionUsd * scale;
     const position = this.ex.getPosition(name);
     const posUsd = fair !== null ? position * fair : 0;
     const risk = assess(
       {
         ...this.risk,
-        emergencyPositionUsd: st.cfg.maxPositionUsd * this.cfg.risk.emergencyPositionMult,
-        reduceToUsd: st.cfg.maxPositionUsd * this.cfg.risk.reduceToMult,
+        emergencyPositionUsd: maxPos * this.cfg.risk.emergencyPositionMult,
+        reduceToUsd: maxPos * this.cfg.risk.reduceToMult,
       },
       {
         now,
@@ -184,26 +295,34 @@ export class MarketMaker {
     }
     if (fair === null) return;
 
+    if (!st.warnedTooSmall && st.cfg.levelSizeUsd * scale / fair < st.spec.minSize) {
+      st.warnedTooSmall = true;
+      this.log("warn", "ramp stage too small: level size is below the market minimum, no quotes until the stage grows", { market: name, sizeMult: scale });
+    }
+
     const target = buildLadder({
       spec: st.spec,
       fair,
       position,
       book,
-      params: this.quoteParams(st, mult),
+      params: this.quoteParams(st, mult * widen, scale),
     });
 
     const empty = target.bids.length + target.asks.length === 0;
     const threatened = isLadderThreatened(st.live, rawBook, this.cfg.engine.threatBps);
-    const due = now - st.lastReplaceAt >= this.cfg.engine.minReplaceIntervalMs;
+    const urgent = topDriftBps(st.live, target) >= this.cfg.engine.urgentRepriceBps;
+    const due = now - st.lastReplaceAt >= st.nextInterval;
     const stale = needsReplace(st.live, target, this.cfg.engine);
 
-    if (!(st.dirty || stale || threatened)) return;
-    if (!due && !threatened && st.live) return;
+    if (!(st.dirty || stale || threatened || urgent)) return;
+    if (!due && !threatened && !urgent && st.live) return;
     // Hard cap on transaction rate: every replace costs gas.
     if (st.live && now - st.lastReplaceAt < this.cfg.engine.hardMinReplaceIntervalMs) return;
 
     const ok = empty ? await this.ex.cancelAll(name) : await this.ex.replaceLadder(name, target);
     st.lastReplaceAt = now;
+    const j = this.cfg.engine.jitterPct;
+    st.nextInterval = this.cfg.engine.minReplaceIntervalMs * (1 + (this.rng() * 2 - 1) * j);
     if (ok) {
       st.live = empty ? null : cloneLadder(target);
       st.dirty = false;
@@ -220,20 +339,27 @@ export class MarketMaker {
     }
   }
 
-  private quoteParams(st: MarketState, mult: number): QuoteParams {
+  private quoteParams(st: MarketState, mult: number, scale: number): QuoteParams {
     const c = st.cfg;
+    const fee = this.ex.getFees?.();
     return {
       levels: c.levels,
       baseHalfSpreadBps: c.baseHalfSpreadBps,
       levelStepBps: c.levelStepBps,
-      levelSizeUsd: c.levelSizeUsd,
+      levelSizeUsd: c.levelSizeUsd * scale,
       sizeGrowth: c.sizeGrowth,
       inventorySkewBps: c.inventorySkewBps,
-      maxPositionUsd: c.maxPositionUsd,
+      maxPositionUsd: c.maxPositionUsd * scale,
       minHalfSpreadBps: c.minHalfSpreadBps,
       spreadMult: mult,
       volBps: realizedVolBps(st.samples),
       volK: c.volK,
+      competition: {
+        joinTouch: this.cfg.competition.joinTouch,
+        improveTicks: this.cfg.competition.improveTicks,
+        makerFeeBps: fee ? fee.maker * 1e4 : this.cfg.competition.makerFeeBps,
+        maxCostBps: this.cfg.points.costBudgetBps,
+      },
     };
   }
 
@@ -246,6 +372,7 @@ export class MarketMaker {
       const positions = Object.fromEntries(
         [...this.states.keys()].map((n) => [n, round(this.ex.getPosition(n), 6)]),
       );
+      const fuses = Object.fromEntries([...this.states.entries()].map(([n, st]) => [n, st.fuse.tripsInLastHour]));
       this.log("info", "status", {
         equity: round(this.ex.getAccount()?.equityUsd ?? NaN, 2),
         dayVolumeUsd: Math.round(s.dayVolumeUsd),
@@ -254,6 +381,9 @@ export class MarketMaker {
         spreadMult: round(s.spreadMult, 3),
         volumeFrac: round(s.volumeFrac, 3),
         streakSecured: s.streakSecured,
+        rampStage: this.ramp.stage,
+        sizeMult: this.ramp.mult,
+        fuseTripsLastHour: fuses,
         positions,
         ...(gasNow ? { txCount: gasNow.txCount, gasApt: round(gasNow.gasApt, 6), signerAptBalance: gasNow.balanceApt === null ? null : round(gasNow.balanceApt, 4) } : {}),
       });
@@ -307,7 +437,10 @@ export class MarketMaker {
       const s = this.points.stats(now);
       const file = this.cfg.engine.stateFile;
       mkdirSync(dirname(file), { recursive: true });
-      writeFileSync(file, JSON.stringify({ dayKey: s.dayKey, dayVolumeUsd: s.dayVolumeUsd, spreadMult: s.spreadMult }));
+      writeFileSync(
+        file,
+        JSON.stringify({ dayKey: s.dayKey, dayVolumeUsd: s.dayVolumeUsd, spreadMult: s.spreadMult, rampStage: this.ramp.stage }),
+      );
     } catch (e) {
       this.log("warn", "state save failed", { error: String(e) });
     }
@@ -317,6 +450,8 @@ export class MarketMaker {
     try {
       const raw = JSON.parse(readFileSync(this.cfg.engine.stateFile, "utf8"));
       if (raw.dayKey === new Date().toISOString().slice(0, 10)) this.points.restore(raw);
+      // The ramp stage is earned over days, so it survives day changes.
+      if (typeof raw.rampStage === "number") this.ramp.restoreStage(raw.rampStage);
     } catch {
       /* no prior state */
     }

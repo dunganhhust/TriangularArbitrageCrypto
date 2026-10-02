@@ -76,4 +76,18 @@ describe("PointsController", () => {
     expect(s.dayVolumeUsd).toBe(42_000);
     expect(s.spreadMult).toBeCloseTo(1.7);
   });
+
+  it("reports toxicity from recent markouts and can be reset", () => {
+    const c = new PointsController(cfg);
+    expect(c.toxicity(3)).toBeNull();
+    let ts = T0;
+    for (let i = 0; i < 3; i++) {
+      c.onFill(fill(i, "buy", 60000, ts, 0.1), 60000);
+      ts += 1_500;
+      c.tick(ts, () => 59982); // -3 bps against us each time
+    }
+    expect(c.toxicity(3)).toBeCloseTo(-3, 1);
+    c.resetToxicity();
+    expect(c.toxicity(3)).toBeNull();
+  });
 });

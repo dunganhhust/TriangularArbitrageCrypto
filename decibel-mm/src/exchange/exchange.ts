@@ -43,6 +43,9 @@ export interface Exchange {
   /** Reduce-only IOC to cut inventory. */
   reduce(req: ReduceRequest): Promise<boolean>;
 
+  /** Optional maker/taker fee rates (decimals, e.g. 0.00015). */
+  getFees?(): { maker: number; taker: number } | null;
+
   /** Optional gas telemetry for venues where the signer pays gas. */
   getGas?(): GasStats | null;
 

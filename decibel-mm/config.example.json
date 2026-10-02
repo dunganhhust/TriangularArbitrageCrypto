@@ -19,11 +19,38 @@
   },
   "risk": {
     "maxDrawdownUsd": 2,
-    "minGasBalanceApt": 0.05
+    "minGasBalanceApt": 0.05,
+    "maxGasAptPerDay": 0.1
   },
   "engine": {
     "minReplaceIntervalMs": 5000,
     "repriceBps": 3,
     "hardMinReplaceIntervalMs": 2000
+  },
+  "ramp": {
+    "enabled": true,
+    "stages": [
+      0.5,
+      1
+    ],
+    "minStageMs": 14400000,
+    "minStageFills": 20,
+    "maxStageLossPct": 3
+  },
+  "fuse": {
+    "enabled": true,
+    "fastMoveBps": 15,
+    "fastWindowMs": 5000,
+    "slowMoveBps": 40,
+    "cooldownMs": 60000,
+    "recoverMs": 300000,
+    "recoverWiden": 2
+  },
+  "competition": {
+    "joinTouch": true,
+    "improveTicks": 0
+  },
+  "execution": {
+    "encrypted": "auto"
   }
 }

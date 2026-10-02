@@ -33,6 +33,14 @@ export const configSchema = z.object({
        * crossing our top quote. 0 = only when it has actually reached or passed it.
        */
       threatBps: z.number().nonnegative().default(0),
+      /**
+       * Replace right away (still respecting hardMinReplaceIntervalMs) when the best bid or ask of
+       * the target ladder has moved this far from the live one. Keeps quotes from going stale
+       * between the slow scheduled refreshes, which is what bots watching the price pick off.
+       */
+      urgentRepriceBps: z.number().positive().default(6),
+      /** Randomise each refresh interval by +/- this fraction so the cadence is not predictable. */
+      jitterPct: z.number().min(0).max(0.9).default(0.2),
       volWindowMs: z.number().int().positive().default(60_000),
       stateFile: z.string().default("state/state.json"),
       killSwitchFile: z.string().default("state/KILL"),
@@ -72,6 +80,61 @@ export const configSchema = z.object({
        * enough that the cancel transaction itself can still be paid for.
        */
       minGasBalanceApt: z.number().nonnegative().default(0.05),
+      /** Stop quoting for the rest of the UTC day once this much APT of gas has been spent. */
+      maxGasAptPerDay: z.number().positive().default(0.5),
+    })
+    .default({}),
+
+  /** Volatility circuit breaker; see strategy/fuse.ts. */
+  fuse: z
+    .object({
+      enabled: z.boolean().default(true),
+      fastMoveBps: z.number().positive().default(15),
+      fastWindowMs: z.number().int().positive().default(5_000),
+      slowMoveBps: z.number().positive().default(40),
+      slowWindowMs: z.number().int().positive().default(60_000),
+      spreadBps: z.number().positive().default(10),
+      oracleDevBps: z.number().positive().default(15),
+      cooldownMs: z.number().int().positive().default(60_000),
+      maxCooldownMs: z.number().int().positive().default(1_800_000),
+      recoverMs: z.number().int().positive().default(300_000),
+      recoverWiden: z.number().min(1).default(2),
+      haltAfterTripsPerHour: z.number().int().positive().default(6),
+      toxicFills: z.number().int().positive().default(5),
+      toxicMarkoutBps: z.number().positive().default(3),
+    })
+    .default({}),
+
+  /** Staged size ramp; the market sizes are the FINAL sizes. See strategy/ramp.ts. */
+  ramp: z
+    .object({
+      enabled: z.boolean().default(true),
+      stages: z.array(z.number().positive().max(1)).min(1).default([0.5, 1]),
+      minStageMs: z.number().int().positive().default(4 * 3_600_000),
+      minStageFills: z.number().int().nonnegative().default(20),
+      maxStageLossPct: z.number().positive().default(3),
+      maxStageTrips: z.number().int().nonnegative().default(0),
+    })
+    .default({}),
+
+  /** Competing for queue priority with other bots. */
+  competition: z
+    .object({
+      joinTouch: z.boolean().default(true),
+      improveTicks: z.number().int().nonnegative().default(0),
+      /** Fallback fee if the venue does not report it. */
+      makerFeeBps: z.number().nonnegative().default(1.5),
+    })
+    .default({}),
+
+  /** How transactions are submitted. */
+  execution: z
+    .object({
+      /**
+       * "auto": submit encrypted (hidden from front-runners) when the node supports it, else plain.
+       * "on": same but warn loudly when unsupported. "off": never encrypt.
+       */
+      encrypted: z.enum(["auto", "on", "off"]).default("auto"),
     })
     .default({}),
 
@@ -95,6 +158,13 @@ export const configSchema = z.object({
       takerFeeBps: z.number().default(3.4),
       equityUsd: z.number().positive().default(5_000),
       seed: z.number().int().default(42),
+      /** Optional price shock for testing the fuse: jump `shockPct` percent at `shockAtSec`. */
+      shockAtSec: z.number().nonnegative().optional(),
+      shockPct: z.number().default(0),
+      /** Optional volatility burst: volatility is multiplied by `burstMult` for `burstSec` from `burstAtSec`. */
+      burstAtSec: z.number().nonnegative().optional(),
+      burstSec: z.number().positive().default(600),
+      burstMult: z.number().positive().default(20),
     })
     .default({}),
 });

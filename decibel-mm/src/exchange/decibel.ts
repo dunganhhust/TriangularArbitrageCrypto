@@ -1,4 +1,11 @@
-import { Ed25519Account, Ed25519PrivateKey } from "@aptos-labs/ts-sdk";
+import {
+  Ed25519Account,
+  Ed25519PrivateKey,
+  MIN_ENCRYPTED_TXN_GAS_UNIT_PRICE,
+  buildTransaction,
+  generateTransactionPayload,
+} from "@aptos-labs/ts-sdk";
+import { randomBytes } from "node:crypto";
 import type { CommittedTransactionResponse, InputGenerateTransactionPayloadData } from "@aptos-labs/ts-sdk";
 import {
   DecibelReadDex,
@@ -6,6 +13,7 @@ import {
   MAINNET_CONFIG,
   TESTNET_CONFIG,
   TimeInForce,
+  configSupportsEncryptedSubmission,
   getMarketAddr,
 } from "@decibeltrade/sdk";
 import type { DecibelConfig, SendTxOpts } from "@decibeltrade/sdk";
@@ -20,6 +28,8 @@ export interface DecibelOpts {
   env: LiveEnv;
   /** Log transactions instead of sending them. Reads and streams stay live. */
   dryRun?: boolean;
+  /** Encrypted (front-run resistant) submission: "auto" uses it when the node supports it. */
+  encrypted?: "auto" | "on" | "off";
   /** Override unit auto-detection. */
   priceUnits?: Units | 'auto';
   sizeUnits?: Units | 'auto';
@@ -81,19 +91,84 @@ type SignAndSubmit = (
  * submit with a max sized from that. A failing simulation throws before anything is paid.
  */
 export class MMWrite extends DecibelWriteDex {
+  /** Gas units a given function actually used (largest recent value), for the unsimulated encrypted path. */
+  readonly learnedGas = new Map<string, number>();
+  private encFailures = 0;
+  encryptionBroken = false;
+  /** Which path the last transaction took. */
+  lastPath: "encrypted" | "plain" = "plain";
+
+  /** Simulate with a fixed ceiling and return the gas actually used. Throws before anything is paid. */
+  async simulateGasUsed(payload: InputGenerateTransactionPayloadData, sender: Parameters<MMWrite["buildTx"]>[1]): Promise<number> {
+    const probe = await this.buildTx({ ...payload, maxGasAmount: SIM_GAS_CEILING }, sender);
+    const [sim] = await this.aptos.transaction.simulate.simple({ transaction: probe });
+    if (!sim) throw new Error("Transaction simulation returned no results");
+    if (!sim.success) throw new Error(`Simulation failed: ${sim.vm_status}`);
+    return Number(sim.gas_used);
+  }
+
   protected override async sendTx(
     payload: InputGenerateTransactionPayloadData,
     { accountOverride }: SendTxOpts = {},
   ): Promise<CommittedTransactionResponse> {
     const signer = accountOverride ?? this.account;
     const sender = signer.accountAddress;
-    const probe = await this.buildTx({ ...payload, maxGasAmount: SIM_GAS_CEILING }, sender);
-    const [sim] = await this.aptos.transaction.simulate.simple({ transaction: probe });
-    if (!sim) throw new Error("Transaction simulation returned no results");
-    if (!sim.success) throw new Error(`Simulation failed: ${sim.vm_status}`);
-    const tx = await this.buildTx({ ...payload, maxGasAmount: submitGasFor(Number(sim.gas_used)) }, sender);
+    const used = await this.simulateGasUsed(payload, sender);
+    const tx = await this.buildTx({ ...payload, maxGasAmount: submitGasFor(used) }, sender);
     const functionId = "function" in payload ? String(payload.function) : undefined;
+    this.lastPath = "plain";
     return (this as unknown as { signAndSubmit: SignAndSubmit }).signAndSubmit(signer, tx, { encrypted: false, functionId });
+  }
+
+  /**
+   * Encrypted submission hides the order from anyone watching pending transactions, which is the
+   * front-running surface on a chain with public mempools. The SDK's encrypted path cannot
+   * simulate and reserves the chain default of 2,000,000 gas units, i.e. it needs more than 2 APT
+   * of balance. We learn each function's real gas with one plain simulation, then submit encrypted
+   * with a max sized from it. Falls back to the plain path when the node does not support
+   * encryption, or after repeated encrypted failures.
+   */
+  protected override async sendEncryptedTx(
+    payload: InputGenerateTransactionPayloadData,
+    opts: SendTxOpts = {},
+  ): Promise<CommittedTransactionResponse> {
+    const internals = this as unknown as { canEncrypt(): Promise<boolean>; signAndSubmit: SignAndSubmit };
+    if (this.encryptionBroken || !(await internals.canEncrypt())) return this.sendTx(payload, opts);
+
+    const signer = opts.accountOverride ?? this.account;
+    const sender = signer.accountAddress;
+    const functionId = "function" in payload ? String(payload.function) : "unknown";
+    let learned = this.learnedGas.get(functionId);
+    if (learned === undefined) {
+      learned = await this.simulateGasUsed(payload, sender);
+      this.learnedGas.set(functionId, learned);
+    }
+    try {
+      const txPayload = await generateTransactionPayload({ aptosConfig: this.aptos.config, ...payload } as never);
+      const tx = await buildTransaction({
+        aptosConfig: this.aptos.config,
+        sender,
+        payload: txPayload,
+        options: {
+          encrypted: true,
+          replayProtectionNonce: randomNonce(),
+          gasUnitPrice: MIN_ENCRYPTED_TXN_GAS_UNIT_PRICE,
+          maxGasAmount: submitGasFor(learned),
+        },
+      } as never);
+      const r = await internals.signAndSubmit(signer, tx, { encrypted: true, functionId });
+      this.encFailures = 0;
+      this.lastPath = "encrypted";
+      if (!r.success && /out of gas/i.test(String(r.vm_status))) {
+        this.learnedGas.set(functionId, Math.min(SIM_GAS_CEILING, learned * 2));
+      } else if (r.gas_used !== undefined) {
+        this.learnedGas.set(functionId, Math.max(Number(r.gas_used), Math.floor(learned * 0.9)));
+      }
+      return r;
+    } catch (e) {
+      if (++this.encFailures >= 2) this.encryptionBroken = true;
+      throw e;
+    }
   }
 
   async placeBulk(args: {
@@ -104,9 +179,10 @@ export class MMWrite extends DecibelWriteDex {
     askPrices: number[];
     askSizes: number[];
   }) {
+    const send = this.defaultEncrypted ? this.sendEncryptedTx.bind(this) : this.sendTx.bind(this);
     return this.sendSubaccountTx(
       (sub) =>
-        this.sendTx({
+        send({
           function: `${this.config.deployment.package}::dex_accounts_entry::place_bulk_orders_to_subaccount`,
           typeArguments: [],
           functionArguments: [
@@ -165,6 +241,7 @@ export class DecibelExchange implements Exchange {
     });
     this.write = new MMWrite(this.config, account, {
       nodeApiKey: env.nodeApiKey,
+      defaultEncrypted: (this.o.encrypted ?? "auto") !== "off",
       onTransactionSettled: (m) => {
         this.txCount++;
         this.gasOctas += (m.gasUsed ?? 0) * (m.gasUnitPrice ?? 0);
@@ -319,6 +396,10 @@ export class DecibelExchange implements Exchange {
     }
   }
 
+  getFees(): { maker: number; taker: number } {
+    return { maker: this.makerRate, taker: this.takerRate };
+  }
+
   getGas(): GasStats {
     return { txCount: this.txCount, gasApt: this.gasOctas / 1e8, balanceApt: this.balanceApt };
   }
@@ -420,7 +501,7 @@ export class DecibelExchange implements Exchange {
       const r = tx as { success?: boolean; vm_status?: string; hash?: string; gas_used?: string };
       const ok = r.success !== false;
       if (!ok) this.log("bulk order tx failed", { market, vm: r.vm_status });
-      else this.log("ladder placed", { market, sequenceNumber, hash: r.hash, gasUsed: r.gas_used, bids: ladder.bids.length, asks: ladder.asks.length });
+      else this.log("ladder placed", { market, sequenceNumber, hash: r.hash, gasUsed: r.gas_used, path: this.write.lastPath, bids: ladder.bids.length, asks: ladder.asks.length });
       return ok;
     } catch (e) {
       this.log("bulk order tx error", { market, error: String(e) });
@@ -434,7 +515,8 @@ export class DecibelExchange implements Exchange {
       return true;
     }
     try {
-      const tx = await this.write.cancelBulkOrder({ marketName: market, subaccountAddr: this.o.env.subaccount });
+      // Cancels are the safety-critical path: always use the simulated plain route, never the encrypted one.
+      const tx = await this.write.cancelBulkOrder({ marketName: market, subaccountAddr: this.o.env.subaccount, encrypted: false });
       return (tx as { success?: boolean }).success !== false;
     } catch (e) {
       this.log("cancel error", { market, error: String(e) });
@@ -553,9 +635,25 @@ export class DecibelExchange implements Exchange {
           }),
         )
         .catch((e: unknown) => ({ error: String(e).slice(0, 200) })),
+      execution: await this.executionInfo(),
       signer: { address: this.write.account.accountAddress.toString(), aptBalance: this.balanceApt, paysGas: true },
       points: await this.getPoints(),
     };
+  }
+
+  private async executionInfo(): Promise<Record<string, unknown>> {
+    const mode = this.o.encrypted ?? "auto";
+    try {
+      const info = (await this.write.aptos.getLedgerInfo()) as unknown as { encryption_key?: unknown };
+      return {
+        mode,
+        configAllowsEncryption: configSupportsEncryptedSubmission(this.config),
+        nodeAdvertisesEncryptionKey: !!info.encryption_key,
+        willEncrypt: mode !== "off" && configSupportsEncryptedSubmission(this.config) && !!info.encryption_key,
+      };
+    } catch (e) {
+      return { mode, error: String(e).slice(0, 160) };
+    }
   }
 
   marketAddrFor(name: string): string {
@@ -597,4 +695,11 @@ function sideOf(action: string): "buy" | "sell" | null {
     default:
       return null; // "Net" is ambiguous; ignore rather than guess
   }
+}
+
+/** Random non-zero 64-bit replay-protection nonce. */
+function randomNonce(): bigint {
+  let n = 0n;
+  while (n === 0n) n = BigInt(`0x${randomBytes(8).toString("hex")}`);
+  return n;
 }

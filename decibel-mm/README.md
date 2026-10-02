@@ -77,6 +77,23 @@ and set `risk.maxDrawdownUsd` to the loss you accept.
 only makes sense if you are knowingly buying points; the controller will widen if measured cost
 exceeds the budget, but only after it has seen `points.minSampleUsd` of volume.
 
+## Protection against fast markets, front-running and bigger bots
+
+| Feature | What it does | Config |
+|---|---|---|
+| **Volatility fuse** | Pulls every quote when the price range exceeds 15 bps in 5 s (or 40 bps in 60 s), the book spread blows out, the book diverges from the oracle, or 5 recent fills averaged -3 bps of markout (toxic flow). Pauses 60 s, doubling on each repeat (max 30 min), then quotes 2x wider narrowing back over 5 min; stops for good after 6 trips in an hour. | `fuse` |
+| **Staged ramp** | Starts at a fraction of the configured sizes (which are the FINAL sizes). Moves up a stage only after 4 h with 20+ fills, no fuse trips and equity not down; a stage that loses 3 % steps back down, or halts at the first stage. | `ramp` |
+| **Anti-stale / anti-pick-off** | Re-quotes at once (rate-limited) when the best bid/ask target moved 6 bps, instead of waiting for the slow schedule; refresh interval is randomised +/-20 % so the cadence is not predictable. | `engine.urgentRepriceBps`, `engine.jitterPct` |
+| **Encrypted submission** | Orders go out as encrypted pending transactions when the node supports it, so nobody watching the mempool sees them. Falls back to plain submission automatically. `check` prints `execution.willEncrypt`. | `execution.encrypted` |
+| **Touch competition** | Rests at the best bid/ask instead of behind it when that costs no more than `points.costBudgetBps` after the maker fee, and never on the side that would add to inventory you are already leaning on. | `competition`, `points.costBudgetBps` |
+| **Gas budget** | Stops quoting for the rest of the UTC day after `risk.maxGasAptPerDay` APT of gas. | `risk` |
+
+Limits, stated plainly:
+
+- **A gap cannot be fenced.** If the price jumps 1 % between two ticks, resting quotes are hit at the old price before any software can react. The fuse stops the *aftermath* (repeated hits during a volatile regime); the only protection against the gap itself is a small position relative to equity. In the simulator a 15-minute burst of 25x volatility cost -3.2 USD on average with the fuse and -11.7 USD without (8 seeds, 1000 USD paper equity, 100 USD max position) — a simulation, not a forecast.
+- **Competition is expensive at tier-0 fees.** With a 1.5 bp maker fee and BTC spreads of a tenth of a bp, sitting at the touch costs about 1.5 bp per fill. The default budget (0.3 bp) therefore keeps the bot behind the touch on BTC; raise `points.costBudgetBps` only if you have decided what a point is worth to you.
+- **Encryption is unverified on mainnet.** It depends on the node advertising an encryption key; check `execution` in the `check` output.
+
 ## Gas (read this before going live)
 
 Every ladder replacement and cancel is an Aptos transaction. The bot does not configure a gas station,

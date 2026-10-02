@@ -20,6 +20,19 @@ export interface QuoteParams {
   /** Short-horizon volatility estimate in bps; widens quotes. */
   volBps: number;
   volK: number;
+  /** Optional touch competition; see {@link buildLadder}. */
+  competition?: CompetitionParams;
+}
+
+export interface CompetitionParams {
+  /** Rest at the best bid/ask (ex our own orders) when that is affordable. */
+  joinTouch: boolean;
+  /** Ticks to improve on the touch by (0 = join it). Only when the spread leaves room. */
+  improveTicks: number;
+  /** Our maker fee, bps. */
+  makerFeeBps: number;
+  /** Net cost per fill (bps, after the fee) we accept in order to sit at the touch. */
+  maxCostBps: number;
 }
 
 export interface QuoteInput {
@@ -109,8 +122,14 @@ export function buildLadder(inp: QuoteInput): Ladder {
     const growth = Math.pow(p.sizeGrowth, i);
 
     let bidPx = roundDownToStep(Math.min(reservation * (1 - offset), maxBid), spec.tickSize);
-    bidPx = Math.min(bidPx, lastBid - spec.tickSize);
     let askPx = roundUpToStep(Math.max(reservation * (1 + offset), minAsk), spec.tickSize);
+    if (i === 0 && p.competition?.joinTouch) {
+      const j = touchPrices(p.competition, spec, fair, book, invRatio);
+      // Take the more aggressive of the spread-based price and the affordable touch price.
+      if (j.bid !== null) bidPx = Math.max(bidPx, Math.min(j.bid, maxBid));
+      if (j.ask !== null) askPx = Math.min(askPx, Math.max(j.ask, minAsk));
+    }
+    bidPx = Math.min(bidPx, lastBid - spec.tickSize);
     askPx = Math.max(askPx, lastAsk + spec.tickSize);
     // Never post an ask at or below our own bid (would self-match).
     if (bidPx > 0 && askPx <= bidPx) askPx = roundUpToStep(bidPx + spec.tickSize, spec.tickSize);
@@ -180,4 +199,48 @@ export function isLadderThreatened(live: Ladder | null, book: Book | null, thres
   if (topBid !== undefined && ((topBid - ba) / mid) * 1e4 >= -thresholdBps) return true;
   if (topAsk !== undefined && ((bb - topAsk) / mid) * 1e4 >= -thresholdBps) return true;
   return false;
+}
+
+/**
+ * Prices at which we could rest at (or just inside) the touch without paying more than the cost
+ * budget. Joining a bid at price b against fair value F earns (F - b)/F in bps before the fee; the
+ * fee turns that negative in tight markets, which is the real price of queue priority. Joining is
+ * refused on the side that would add to an inventory we are already leaning on.
+ */
+export function touchPrices(
+  c: CompetitionParams,
+  spec: MarketSpec,
+  fair: number,
+  book: Book | null,
+  invRatio: number,
+): { bid: number | null; ask: number | null } {
+  const bestBid = book?.bids[0]?.price;
+  const bestAsk = book?.asks[0]?.price;
+  let bid: number | null = null;
+  let ask: number | null = null;
+  const room = bestBid !== undefined && bestAsk !== undefined ? bestAsk - bestBid : 0;
+  const improve = c.improveTicks > 0 && room >= (c.improveTicks + 2) * spec.tickSize ? c.improveTicks * spec.tickSize : 0;
+  if (bestBid !== undefined && invRatio < 0.5) {
+    const px = bestBid + improve;
+    const edge = ((fair - px) / fair) * 1e4 - c.makerFeeBps;
+    if (edge >= -c.maxCostBps) bid = px;
+  }
+  if (bestAsk !== undefined && invRatio > -0.5) {
+    const px = bestAsk - improve;
+    const edge = ((px - fair) / fair) * 1e4 - c.makerFeeBps;
+    if (edge >= -c.maxCostBps) ask = px;
+  }
+  return { bid, ask };
+}
+
+/** Largest relative move (bps) of the best bid or best ask between two ladders. */
+export function topDriftBps(live: Ladder | null, target: Ladder): number {
+  if (!live) return 0;
+  let worst = 0;
+  const cmp = (a?: Quote, b?: Quote): void => {
+    if (a && b && b.price > 0) worst = Math.max(worst, (Math.abs(a.price - b.price) / b.price) * 1e4);
+  };
+  cmp(live.bids[0], target.bids[0]);
+  cmp(live.asks[0], target.asks[0]);
+  return worst;
 }

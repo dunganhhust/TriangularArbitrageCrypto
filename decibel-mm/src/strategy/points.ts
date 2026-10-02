@@ -69,6 +69,8 @@ export class PointsController {
   private ewmaNum = 0; // sum of pnlUsd, decayed
   private ewmaDen = 0; // sum of notional, decayed
   private now = 0;
+  /** Gross markouts (bps, positive = good for us) of the most recent fills. */
+  private recentMarkouts: number[] = [];
 
   constructor(
     private readonly cfg: PointsConfig,
@@ -122,6 +124,20 @@ export class PointsController {
     const lambda = Math.pow(0.5, n / this.cfg.ewmaHalfLifeUsd);
     this.ewmaNum = this.ewmaNum * lambda + pnlUsd;
     this.ewmaDen = this.ewmaDen * lambda + n;
+    this.recentMarkouts.push((dir * (laterMid - fill.price)) / fill.price * 1e4);
+    if (this.recentMarkouts.length > 20) this.recentMarkouts.shift();
+  }
+
+  /** Average gross markout of the last `n` resolved fills, or null with fewer than `n`. */
+  toxicity(n: number): number | null {
+    if (this.recentMarkouts.length < n) return null;
+    const w = this.recentMarkouts.slice(-n);
+    return w.reduce((a, b) => a + b, 0) / n;
+  }
+
+  /** Forget recent markouts (after the fuse has acted on them). */
+  resetToxicity(): void {
+    this.recentMarkouts = [];
   }
 
   private rollDay(ts: number): void {
