@@ -1,4 +1,5 @@
 import { Ed25519Account, Ed25519PrivateKey } from "@aptos-labs/ts-sdk";
+import type { CommittedTransactionResponse, InputGenerateTransactionPayloadData } from "@aptos-labs/ts-sdk";
 import {
   DecibelReadDex,
   DecibelWriteDex,
@@ -7,7 +8,7 @@ import {
   TimeInForce,
   getMarketAddr,
 } from "@decibeltrade/sdk";
-import type { DecibelConfig } from "@decibeltrade/sdk";
+import type { DecibelConfig, SendTxOpts } from "@decibeltrade/sdk";
 import type { LiveEnv } from "../config.js";
 import type { AccountInfo, Book, BookLevel, Fill, Ladder, MarketSpec, PointsSnapshot, PriceInfo } from "../types.js";
 import type { Exchange, GasStats, ReduceRequest } from "./exchange.js";
@@ -53,8 +54,48 @@ export function detectUnits(
   return "unknown";
 }
 
-/** Subclass only to reach the SDK's protected `sendTx` for the perp bulk-order entry points. */
-class MMWrite extends DecibelWriteDex {
+/** Highest max_gas_amount we will reserve while simulating (units; reserve = units * gas price). */
+export const SIM_GAS_CEILING = 50_000;
+/** Floor for the max_gas_amount we submit with. */
+export const MIN_SUBMIT_GAS = 2_000;
+
+/** max_gas_amount to submit with: 2x the simulated usage, within [MIN_SUBMIT_GAS, SIM_GAS_CEILING]. */
+export function submitGasFor(gasUsed: number): number {
+  return Math.min(SIM_GAS_CEILING, Math.max(Math.ceil(gasUsed * 2), MIN_SUBMIT_GAS));
+}
+
+type SignAndSubmit = (
+  signer: unknown,
+  tx: unknown,
+  telemetry: { encrypted: boolean; functionId?: string },
+) => Promise<CommittedTransactionResponse>;
+
+/**
+ * Subclass for (1) the perp bulk-order entry points, which the SDK only wraps for spot, and
+ * (2) a self-pay `sendTx`.
+ *
+ * The SDK's self-pay path simulates with `estimateMaxGasAmount`, which makes the node report the
+ * account's whole balance as max gas, then submits with 2x that. The fee reserve is then twice
+ * the balance, so every transaction is rejected with INSUFFICIENT_BALANCE_FOR_TRANSACTION_FEE
+ * whatever the balance. We simulate with a fixed ceiling instead, read the real gas used, and
+ * submit with a max sized from that. A failing simulation throws before anything is paid.
+ */
+export class MMWrite extends DecibelWriteDex {
+  protected override async sendTx(
+    payload: InputGenerateTransactionPayloadData,
+    { accountOverride }: SendTxOpts = {},
+  ): Promise<CommittedTransactionResponse> {
+    const signer = accountOverride ?? this.account;
+    const sender = signer.accountAddress;
+    const probe = await this.buildTx({ ...payload, maxGasAmount: SIM_GAS_CEILING }, sender);
+    const [sim] = await this.aptos.transaction.simulate.simple({ transaction: probe });
+    if (!sim) throw new Error("Transaction simulation returned no results");
+    if (!sim.success) throw new Error(`Simulation failed: ${sim.vm_status}`);
+    const tx = await this.buildTx({ ...payload, maxGasAmount: submitGasFor(Number(sim.gas_used)) }, sender);
+    const functionId = "function" in payload ? String(payload.function) : undefined;
+    return (this as unknown as { signAndSubmit: SignAndSubmit }).signAndSubmit(signer, tx, { encrypted: false, functionId });
+  }
+
   async placeBulk(args: {
     marketAddr: string;
     sequenceNumber: number;
