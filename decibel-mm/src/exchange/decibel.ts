@@ -10,7 +10,7 @@ import {
 import type { DecibelConfig } from "@decibeltrade/sdk";
 import type { LiveEnv } from "../config.js";
 import type { AccountInfo, Book, BookLevel, Fill, Ladder, MarketSpec, PointsSnapshot, PriceInfo } from "../types.js";
-import type { Exchange, ReduceRequest } from "./exchange.js";
+import type { Exchange, GasStats, ReduceRequest } from "./exchange.js";
 
 type Units = "human" | "chain";
 
@@ -103,6 +103,9 @@ export class DecibelExchange implements Exchange {
   private szUnits = new Map<string, Units>();
   private seq = new Map<string, number>();
   private timers: NodeJS.Timeout[] = [];
+  private txCount = 0;
+  private gasOctas = 0;
+  private balanceApt: number | null = null;
   private makerRate = 0.00011;
   private takerRate = 0.00034;
   private readonly log: (msg: string, extra?: Record<string, unknown>) => void;
@@ -119,7 +122,13 @@ export class DecibelExchange implements Exchange {
       nodeApiKey: env.nodeApiKey,
       onWsError: (e) => this.log("ws error", { error: String((e as { message?: string }).message ?? e) }),
     });
-    this.write = new MMWrite(this.config, account, { nodeApiKey: env.nodeApiKey });
+    this.write = new MMWrite(this.config, account, {
+      nodeApiKey: env.nodeApiKey,
+      onTransactionSettled: (m) => {
+        this.txCount++;
+        this.gasOctas += (m.gasUsed ?? 0) * (m.gasUnitPrice ?? 0);
+      },
+    });
     this.write.subaccount = env.subaccount;
 
     const all = await this.read.markets.getAll();
@@ -157,12 +166,14 @@ export class DecibelExchange implements Exchange {
     for (const name of marketNames) await this.bootstrapMarket(name);
     await this.refreshAccount();
     await this.refreshPositions();
+    await this.refreshGasBalance();
 
     this.unsubs.push(
       this.read.userTradeHistory.subscribeByAddr(env.subaccount, (msg) => this.onTrades(msg.trades as unknown as TradeRow[])),
     );
     this.timers.push(setInterval(() => void this.refreshPositions().catch(() => {}), 1000));
     this.timers.push(setInterval(() => void this.refreshAccount().catch(() => {}), 5000));
+    this.timers.push(setInterval(() => void this.refreshGasBalance().catch(() => {}), 15_000));
     return out;
   }
 
@@ -248,6 +259,22 @@ export class DecibelExchange implements Exchange {
   private async refreshAccount(): Promise<void> {
     const ov = await this.read.accountOverview.getByAddr({ subAddr: this.o.env.subaccount });
     this.account = { equityUsd: ov.perp_equity_balance, ts: Date.now() };
+  }
+
+  /** The signing (hot) account pays gas in APT unless a gas station is configured. */
+  private async refreshGasBalance(): Promise<void> {
+    try {
+      const octas = await this.write.aptos.getAccountAPTAmount({ accountAddress: this.write.account.accountAddress });
+      this.balanceApt = Number(octas) / 1e8;
+    } catch (e) {
+      // A key that never received funds has no on-chain account yet: that is a zero balance.
+      if (/not\s*found|404|does not exist/i.test(String(e))) this.balanceApt = 0;
+      else this.log("gas balance lookup failed", { error: String(e).slice(0, 160) });
+    }
+  }
+
+  getGas(): GasStats {
+    return { txCount: this.txCount, gasApt: this.gasOctas / 1e8, balanceApt: this.balanceApt };
   }
 
   private async refreshPositions(): Promise<void> {
@@ -457,6 +484,7 @@ export class DecibelExchange implements Exchange {
       }),
       markets: markets.map((m) => ({ name: m.market_name, tick: m.tick_size, lot: m.lot_size, min: m.min_size, maxLev: m.max_leverage, mode: m.mode })),
       equity: this.account?.equityUsd,
+      signer: { address: this.write.account.accountAddress.toString(), aptBalance: this.balanceApt, paysGas: true },
       points: await this.getPoints(),
     };
   }

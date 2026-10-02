@@ -9,6 +9,15 @@ export interface ReduceRequest {
   limitPrice: number;
 }
 
+export interface GasStats {
+  /** Transactions this process has submitted. */
+  txCount: number;
+  /** Gas spent by this process, in APT. */
+  gasApt: number;
+  /** Current APT balance of the signing account (it pays gas), if known. */
+  balanceApt: number | null;
+}
+
 /** What the market maker needs from a venue. Implemented by the live adapter and the simulator. */
 export interface Exchange {
   /** Connect, load market specs, start streams. */
@@ -33,6 +42,9 @@ export interface Exchange {
   cancelAll(market: string): Promise<boolean>;
   /** Reduce-only IOC to cut inventory. */
   reduce(req: ReduceRequest): Promise<boolean>;
+
+  /** Optional gas telemetry for venues where the signer pays gas. */
+  getGas?(): GasStats | null;
 
   /** Optional points/fee telemetry; null when not available. */
   getPoints?(): Promise<PointsSnapshot | null>;

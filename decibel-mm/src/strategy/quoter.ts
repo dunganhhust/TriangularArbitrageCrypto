@@ -87,7 +87,8 @@ export function buildLadder(inp: QuoteInput): Ladder {
   const invRatio = Math.max(-1, Math.min(1, p.maxPositionUsd > 0 ? posUsd / p.maxPositionUsd : 0));
   const reservation = fair * (1 - (invRatio * p.inventorySkewBps) / 1e4);
 
-  const half0 = Math.max(p.minHalfSpreadBps, p.baseHalfSpreadBps + p.volK * p.volBps) * p.spreadMult;
+  // The floor applies after the multiplier so spreadMult < 1 can never undercut minHalfSpreadBps.
+  const half0 = Math.max(p.minHalfSpreadBps, (p.baseHalfSpreadBps + p.volK * p.volBps) * p.spreadMult);
 
   const bestBid = book?.bids[0]?.price;
   const bestAsk = book?.asks[0]?.price;

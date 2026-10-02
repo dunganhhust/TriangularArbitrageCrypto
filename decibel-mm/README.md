@@ -77,6 +77,21 @@ and set `risk.maxDrawdownUsd` to the loss you accept.
 only makes sense if you are knowingly buying points; the controller will widen if measured cost
 exceeds the budget, but only after it has seen `points.minSampleUsd` of volume.
 
+## Gas (read this before going live)
+
+Every ladder replacement and cancel is an Aptos transaction. The bot does not configure a gas station,
+so **the signing (hot) key pays gas in APT** and must hold some. Cost per transaction is unmeasured here,
+and the simulator showed roughly 1 transaction per few seconds, so gas can easily exceed the profit of a
+small account. The bot therefore:
+
+- caps the rate (`engine.minReplaceIntervalMs`, `engine.hardMinReplaceIntervalMs`, `engine.repriceBps`);
+- logs `txCount`, `gasApt` (spent this run) and `signerAptBalance` in every `status` line;
+- halts and cancels quotes when the signer balance drops below `risk.minGasBalanceApt`, while it can
+  still pay for the cancel. If a key runs out of APT completely, resting orders cannot be cancelled by the bot.
+
+First live run: fund the hot key with a small amount of APT, trade tiny size for ~10 minutes, then read
+`gasApt / txCount` from the logs and compare per-day gas against your expected volume income.
+
 ## Risk controls
 
 - Pause + cancel on: stale/empty/crossed book, wide spread, mid vs oracle divergence, tx cool-down.

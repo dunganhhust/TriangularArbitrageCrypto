@@ -61,6 +61,14 @@ describe("buildLadder", () => {
     expect(vol.asks[0]!.price).toBeGreaterThan(base.asks[0]!.price);
   });
 
+  it("treats minHalfSpreadBps as a true floor even when spreadMult < 1", () => {
+    const p = { ...params, baseHalfSpreadBps: 2, minHalfSpreadBps: 1.5, spreadMult: 0.5, levels: 1 };
+    const l = buildLadder({ spec, fair: 60000, position: 0, book: null, params: p });
+    // 1.5 bps of 60000 = 9; bid must be at or below 59991, ask at or above 60009.
+    expect(l.bids[0]!.price).toBeLessThanOrEqual(59991);
+    expect(l.asks[0]!.price).toBeGreaterThanOrEqual(60009);
+  });
+
   it("returns nothing without a price", () => {
     expect(buildLadder({ spec, fair: 0, position: 0, book: null, params })).toEqual({ bids: [], asks: [] });
   });

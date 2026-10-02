@@ -23,9 +23,11 @@ export const configSchema = z.object({
     .object({
       tickMs: z.number().int().positive().default(250),
       /** Minimum gap between on-chain ladder replacements per market. */
-      minReplaceIntervalMs: z.number().int().positive().default(600),
-      repriceBps: z.number().positive().default(1),
+      minReplaceIntervalMs: z.number().int().positive().default(3000),
+      repriceBps: z.number().positive().default(2),
       sizeTol: z.number().positive().default(0.15),
+      /** Even urgent replacements wait at least this long since the previous one (caps gas burn). */
+      hardMinReplaceIntervalMs: z.number().int().positive().default(1000),
       /** Replace immediately (ignoring the interval) when the touch is this close to our top quote. */
       threatBps: z.number().nonnegative().default(0.3),
       volWindowMs: z.number().int().positive().default(60_000),
@@ -62,6 +64,11 @@ export const configSchema = z.object({
       maxDrawdownUsd: z.number().positive().default(50),
       maxConsecutiveFailures: z.number().int().positive().default(4),
       cooldownMs: z.number().int().positive().default(15_000),
+      /**
+       * Halt (and cancel quotes) when the signer's APT balance falls below this. Keep it high
+       * enough that the cancel transaction itself can still be paid for.
+       */
+      minGasBalanceApt: z.number().nonnegative().default(0.05),
     })
     .default({}),
 

@@ -103,6 +103,13 @@ export class MarketMaker {
     const acct = this.ex.getAccount();
     if (acct && this.startEquity === null) this.startEquity = acct.equityUsd;
 
+    const gas = this.ex.getGas?.() ?? null;
+    if (gas && gas.balanceApt !== null && gas.balanceApt < this.cfg.risk.minGasBalanceApt) {
+      this.log("error", "HALT", { reason: "signer APT balance below reserve", balanceApt: gas.balanceApt, minGasBalanceApt: this.cfg.risk.minGasBalanceApt });
+      await this.haltAll();
+      return;
+    }
+
     const mult = this.points.spreadMult(now);
 
     for (const st of this.states.values()) {
@@ -192,6 +199,8 @@ export class MarketMaker {
 
     if (!(st.dirty || stale || threatened)) return;
     if (!due && !threatened && st.live) return;
+    // Hard cap on transaction rate: every replace costs gas.
+    if (st.live && now - st.lastReplaceAt < this.cfg.engine.hardMinReplaceIntervalMs) return;
 
     const ok = empty ? await this.ex.cancelAll(name) : await this.ex.replaceLadder(name, target);
     st.lastReplaceAt = now;
@@ -233,6 +242,7 @@ export class MarketMaker {
     if (now - this.lastStatus >= e.statusEveryMs) {
       this.lastStatus = now;
       const s = this.points.stats(now);
+      const gasNow = this.ex.getGas?.() ?? null;
       const positions = Object.fromEntries(
         [...this.states.keys()].map((n) => [n, round(this.ex.getPosition(n), 6)]),
       );
@@ -245,6 +255,7 @@ export class MarketMaker {
         volumeFrac: round(s.volumeFrac, 3),
         streakSecured: s.streakSecured,
         positions,
+        ...(gasNow ? { txCount: gasNow.txCount, gasApt: round(gasNow.gasApt, 6), signerAptBalance: gasNow.balanceApt === null ? null : round(gasNow.balanceApt, 4) } : {}),
       });
     }
     if (this.ex.getPoints && now - this.lastPointsPoll >= e.pointsPollEveryMs) {
