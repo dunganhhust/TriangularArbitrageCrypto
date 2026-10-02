@@ -536,7 +536,9 @@ async function refresh() {
     if (!S.aptAuto) q.set("apt", String(S.apt));
     const res = await fetch("/api/data?" + q, { cache: "no-store" });
     if (!res.ok) throw new Error("HTTP " + res.status);
-    render(await res.json());
+    const data = await res.json();
+    if (!Array.isArray(data.markets) || !data.window) throw new Error("tiến trình dashboard trên máy ảo là bản cũ (chưa khởi động lại sau khi cập nhật mã). Tắt nó (kill) rồi chạy lại lệnh dashboard");
+    render(data);
   } catch (err) {
     setHTML("alerts", `<div class="alert error">Không lấy được dữ liệu từ dashboard server: ${esc(err.message || err)}. Kiểm tra tiến trình dashboard và đường hầm SSH.</div>`);
   } finally {

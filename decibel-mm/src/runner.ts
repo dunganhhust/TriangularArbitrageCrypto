@@ -70,3 +70,61 @@ export async function runLoop(o: RunnerOpts): Promise<RunResult> {
     if (wait > 0) await sleep(wait);
   }
 }
+
+export interface ShutdownDeps {
+  haltAll(): Promise<void>;
+  close(): Promise<void>;
+  exit(code: number): void;
+  log: Logger;
+}
+
+/**
+ * Handles SIGINT / SIGTERM. A signal means "pull the quotes and stop", and the process must not exit until the
+ * cancel transactions have been sent. `MarketMaker.haltAll()` marks the engine halted at once, so the control loop
+ * sees a halt a moment later; without this class that loop's exit raced the cancels and could leave orders resting
+ * on-chain. The loop now waits on `pending()` instead of exiting by itself.
+ */
+export class Shutdown {
+  private promise: Promise<void> | null = null;
+  private signals = 0;
+  private ending = false;
+
+  constructor(private readonly d: ShutdownDeps) {}
+
+  /** The run is closing its positions: signals are ignored once, and a second one aborts. */
+  markEnding(): void {
+    this.ending = true;
+  }
+
+  onSignal(sig: string): Promise<void> {
+    this.signals++;
+    if (this.ending) {
+      if (this.signals >= 2) {
+        this.d.log("error", "aborted while closing positions: they may still be open", { sig });
+        this.d.exit(1);
+      } else {
+        this.d.log("warn", "closing positions; send the signal again to abort", { sig });
+      }
+      return Promise.resolve();
+    }
+    if (this.promise) return this.promise;
+    this.d.log("warn", "shutting down, cancelling quotes", { sig });
+    this.promise = (async () => {
+      try {
+        await this.d.haltAll();
+      } finally {
+        try {
+          await this.d.close();
+        } finally {
+          this.d.exit(0);
+        }
+      }
+    })();
+    return this.promise;
+  }
+
+  /** Non-null from the first signal until the process exits. */
+  pending(): Promise<void> | null {
+    return this.promise;
+  }
+}

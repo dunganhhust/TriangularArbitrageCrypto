@@ -287,7 +287,7 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
   if (!hasActivity) {
     state = "no-data";
     detail = "Chưa có log. Hãy chạy bot (live hoặc live --dry-run).";
-  } else if (haltLine || run.some((l) => l.msg === "halted; exiting")) {
+  } else if (haltLine || (!stopped && run.some((l) => l.msg === "halted; exiting"))) {
     state = "halted";
     detail = `Bot tự dừng: ${String(haltLine?.reason ?? "xem Sự kiện")}`;
   } else if (finish) {

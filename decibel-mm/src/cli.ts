@@ -5,7 +5,7 @@ import { startDashboard } from "./dashboard/server.js";
 import { MarketMaker, jsonLogger, setRunLogFile } from "./engine.js";
 import { DecibelExchange } from "./exchange/decibel.js";
 import { PaperExchange } from "./exchange/paper.js";
-import { runLoop } from "./runner.js";
+import { runLoop, Shutdown } from "./runner.js";
 
 const USAGE = `usage:
   tsx src/cli.ts paper [config.json] [--hours N]     simulated venue, no network
@@ -195,28 +195,9 @@ async function runLive(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promi
     killSwitch: () => existsSync(cfg.engine.killSwitchFile),
     endsAt,
   });
-  let stopping = false;
-  let ending = false;
-  let signals = 0;
-  const stop = async (sig: string): Promise<void> => {
-    signals++;
-    if (ending) {
-      if (signals >= 2) {
-        jsonLogger("error", "aborted while closing positions: they may still be open", { sig });
-        process.exit(1);
-      }
-      jsonLogger("warn", "closing positions; send the signal again to abort", { sig });
-      return;
-    }
-    if (stopping) return;
-    stopping = true;
-    jsonLogger("warn", "shutting down, cancelling quotes", { sig });
-    await mm.haltAll();
-    await ex.close();
-    process.exit(0);
-  };
-  process.on("SIGINT", () => void stop("SIGINT"));
-  process.on("SIGTERM", () => void stop("SIGTERM"));
+  const shutdown = new Shutdown({ haltAll: () => mm.haltAll(), close: () => ex.close(), exit: (c) => process.exit(c), log: jsonLogger });
+  process.on("SIGINT", () => void shutdown.onSignal("SIGINT"));
+  process.on("SIGTERM", () => void shutdown.onSignal("SIGTERM"));
 
   const res = await runLoop({
     mm,
@@ -224,10 +205,14 @@ async function runLive(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promi
     endsAt,
     stopFile: cfg.engine.stopFile,
     log: jsonLogger,
-    onEnding: () => {
-      ending = true;
-    },
+    onEnding: () => shutdown.markEnding(),
   });
+  // A signal already started cancelling the quotes: let that finish (it exits the process) instead of racing it.
+  const cancelling = shutdown.pending();
+  if (cancelling) {
+    await cancelling;
+    return;
+  }
   await ex.close();
   if (res.end === "halted") {
     jsonLogger("error", "halted; exiting");
