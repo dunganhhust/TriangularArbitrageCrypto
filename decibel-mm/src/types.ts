@@ -1,7 +1,7 @@
 /** Domain types. All prices/sizes here are HUMAN units (USD per base, base units). */
 
 export interface MarketSpec {
-  name: string; // e.g. "BTC-USD"
+  name: string; // e.g. "BTC/USD" (mainnet names use a slash; `npm run check` lists them)
   addr: string;
   pxDecimals: number;
   szDecimals: number;

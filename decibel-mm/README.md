@@ -61,6 +61,8 @@ Set `"network": "testnet"` first. Stop with Ctrl-C (cancels quotes) or `touch st
 
 ## Config (config.json)
 
+Market `name` must match Decibel exactly; on mainnet that is e.g. `BTC/USD` (with a slash). If it is wrong, the bot exits with the list of available names.
+
 Per market: `maxPositionUsd`, `levelSizeUsd`, `levels`, `baseHalfSpreadBps`, `levelStepBps`,
 `inventorySkewBps`, `minHalfSpreadBps`, `volK`. Global sections `points`, `risk`, `engine`, `live`,
 `paper` — all defaults are in `src/config.ts`. Start small: `maxPositionUsd` of a few hundred USD.

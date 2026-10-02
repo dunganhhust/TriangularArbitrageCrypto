@@ -2,7 +2,7 @@
   "network": "testnet",
   "markets": [
     {
-      "name": "BTC-USD",
+      "name": "BTC/USD",
       "maxPositionUsd": 500,
       "levelSizeUsd": 100,
       "levels": 3,
