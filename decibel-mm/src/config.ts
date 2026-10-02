@@ -28,8 +28,11 @@ export const configSchema = z.object({
       sizeTol: z.number().positive().default(0.15),
       /** Even urgent replacements wait at least this long since the previous one (caps gas burn). */
       hardMinReplaceIntervalMs: z.number().int().positive().default(1000),
-      /** Replace immediately (ignoring the interval) when the touch is this close to our top quote. */
-      threatBps: z.number().nonnegative().default(0.3),
+      /**
+       * Replace immediately (ignoring the interval) when the opposite touch is within this many bps of
+       * crossing our top quote. 0 = only when it has actually reached or passed it.
+       */
+      threatBps: z.number().nonnegative().default(0),
       volWindowMs: z.number().int().positive().default(60_000),
       stateFile: z.string().default("state/state.json"),
       killSwitchFile: z.string().default("state/KILL"),

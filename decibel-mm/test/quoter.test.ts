@@ -98,9 +98,14 @@ describe("book helpers", () => {
     expect(needsReplace(t, noise, rules)).toBe(false);
   });
 
-  it("flags a ladder the market has run into", () => {
+  it("flags a ladder only when the market has reached or passed it", () => {
     const live = { bids: [{ price: 100, size: 1 }], asks: [{ price: 101, size: 1 }] };
-    expect(isLadderThreatened(live, book(99, 100.001), 0.3)).toBe(true); // ask fell onto our bid
-    expect(isLadderThreatened(live, book(99.5, 101.5), 0.3)).toBe(false);
+    expect(isLadderThreatened(live, book(98, 99.9), 0)).toBe(true); // ask fell through our bid
+    expect(isLadderThreatened(live, book(101.5, 102), 0)).toBe(true); // bid rose through our ask
+    expect(isLadderThreatened(live, book(99.5, 101.5), 0)).toBe(false);
+    // Quotes hugging the touch of a tight market are normal, not threatened.
+    expect(isLadderThreatened(live, book(99.99, 100.001), 0)).toBe(false);
+    // Tolerance widens the trigger.
+    expect(isLadderThreatened(live, book(99.99, 100.001), 0.3)).toBe(true);
   });
 });

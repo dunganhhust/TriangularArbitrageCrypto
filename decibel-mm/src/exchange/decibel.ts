@@ -234,7 +234,12 @@ export class DecibelExchange implements Exchange {
     const ps = this.pxScale(name);
     const ss = this.szScale(name);
     const conv = (l: BookLevel): BookLevel => ({ price: l.price / ps, size: l.size / ss });
-    return { bids: bids.map(conv), asks: asks.map(conv), ts: ts || Date.now() };
+    // The wire order of depth levels is undocumented; the engine relies on best-first, so sort.
+    return {
+      bids: bids.map(conv).sort((a, b) => b.price - a.price),
+      asks: asks.map(conv).sort((a, b) => a.price - b.price),
+      ts: ts || Date.now(),
+    };
   }
 
   private toPrice(name: string, p: PriceRow): PriceInfo {

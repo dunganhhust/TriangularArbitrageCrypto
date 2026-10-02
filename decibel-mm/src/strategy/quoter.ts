@@ -163,7 +163,12 @@ function sideDiffers(a: Quote[], b: Quote[], r: ReplaceRules): boolean {
   return false;
 }
 
-/** A resting quote that would now be marketable or inside the touch is unsafe to leave up. */
+/**
+ * A resting quote is threatened when the market has moved onto or through it (our bid at or above
+ * the best ask, or our ask at or below the best bid), shifted by `thresholdBps` of tolerance.
+ * A quote merely sitting at the touch of a tight market is normal and must not count: BTC spreads
+ * are a fraction of a bp, so any maker quote is "close" to the opposite side all the time.
+ */
 export function isLadderThreatened(live: Ladder | null, book: Book | null, thresholdBps: number): boolean {
   if (!live || !book) return false;
   const bb = book.bids[0]?.price;
@@ -172,8 +177,7 @@ export function isLadderThreatened(live: Ladder | null, book: Book | null, thres
   const mid = (bb + ba) / 2;
   const topBid = live.bids[0]?.price;
   const topAsk = live.asks[0]?.price;
-  // The market moved through (or to within thresholdBps of) our quote: adverse-selection risk.
-  if (topBid !== undefined && ((topBid - ba) / mid) * 1e4 > -thresholdBps) return true;
-  if (topAsk !== undefined && ((bb - topAsk) / mid) * 1e4 > -thresholdBps) return true;
+  if (topBid !== undefined && ((topBid - ba) / mid) * 1e4 >= -thresholdBps) return true;
+  if (topAsk !== undefined && ((bb - topAsk) / mid) * 1e4 >= -thresholdBps) return true;
   return false;
 }
