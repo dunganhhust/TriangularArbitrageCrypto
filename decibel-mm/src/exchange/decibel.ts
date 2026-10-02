@@ -613,13 +613,20 @@ export class DecibelExchange implements Exchange {
       network: this.o.network,
       subaccount: this.o.env.subaccount,
       // Configured markets in human units: what you need to size quotes (min order value in USD).
+      // Volume is the ceiling on what a maker can fill: every maker fill is the other side of a trade.
       marketActivity: await this.read.marketContexts
         .getAll()
-        .then((rows) =>
-          rows
-            .filter((r) => this.specs.has(this.byAddr.get(r.market.toLowerCase()) ?? r.market) || [...this.specs.values()].some((sp) => sp.addr.toLowerCase() === r.market.toLowerCase()))
-            .map((r) => ({ market: this.byAddr.get(r.market.toLowerCase()) ?? r.market, volume24h: r.volume_24h, openInterest: r.open_interest, change24hPct: r.price_change_pct_24h })),
-        )
+        .then((rows) => {
+          const nameOf = new Map(markets.map((m) => [m.market_addr.toLowerCase(), m.market_name]));
+          const named = rows.map((r) => ({ market: nameOf.get(r.market.toLowerCase()) ?? r.market, volume24h: r.volume_24h, openInterest: r.open_interest, change24hPct: r.price_change_pct_24h }));
+          const sorted = [...named].sort((a, b) => b.volume24h - a.volume24h);
+          return {
+            platformVolume24hUsd: Math.round(named.reduce((a, r) => a + r.volume24h, 0)),
+            marketsWithVolume: named.filter((r) => r.volume24h > 0).length,
+            top10ByVolume24h: sorted.slice(0, 10).map((r) => ({ market: r.market, volume24h: Math.round(r.volume24h) })),
+            configured: named.filter((r) => this.specs.has(r.market)),
+          };
+        })
         .catch((e: unknown) => ({ error: String(e).slice(0, 160) })),
       configured: [...this.specs.values()].map((sp) => {
         const mid = this.prices.get(sp.name)?.mid ?? null;
