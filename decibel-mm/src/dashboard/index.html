@@ -438,7 +438,8 @@ function renderControl(d) {
     st = '<b>Bot không chạy.</b>' + (r.finish ? ` Phiên trước ${r.finish.closed ? "đã đóng toàn bộ vị thế" : '<b class="bad">còn vị thế chưa đóng</b>'}.` : "");
   }
   const mk = cf.markets ? "Sẽ chạy: " + cf.network + " · " + cf.markets.map((m) => `${esc(m.name)} (tối đa ${m.maxPositionUsd} USD, mỗi mức ${m.levelSizeUsd})`).join(" · ") + ` · làm mới ${Math.round((cf.minReplaceIntervalMs || 0) / 60000 * 10) / 10} phút` : cf.error ? `<span class="bad">Cấu hình lỗi: ${esc(cf.error)}</span>` : "";
-  const warn = (c.killFile ? '<br><span class="bad">File state/KILL đang tồn tại: không thể bắt đầu cho đến khi xóa nó.</span>' : "") +
+  const legacy = c.legacy ? `<br><span class="bad">Có bot đang chạy (PID ${c.pid ?? "?"}) nhưng không ghi live.json: đây là bản cũ, nút Kết thúc không có tác dụng với nó. Dừng bằng <span class="mono">kill -TERM ${c.pid ?? "PID"}</span> (hủy lệnh, giữ vị thế) hoặc để nó chạy hết giờ, rồi chạy phiên mới từ dashboard.</span>` : "";
+  const warn = legacy + (c.killFile ? '<br><span class="bad">File state/KILL đang tồn tại: không thể bắt đầu cho đến khi xóa nó.</span>' : "") +
     (!c.envFileOk ? '<br><span class="bad">Không thấy file khóa (--env-file): không thể bắt đầu từ dashboard.</span>' : "");
   setHTML("ctlStatus", `${st}<div class="sub">${mk}${warn}</div>`);
   const hasTok = TOKEN.length >= 32;

@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { SpawnOptions } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { loadConfig } from "../config.js";
 
@@ -31,6 +31,8 @@ export interface ControlOpts {
   /** Test hooks. */
   spawnFn?: (cmd: string, args: string[], opts: SpawnOptions) => { pid?: number; unref(): void };
   isAlive?: (pid: number) => boolean;
+  /** Pids of every `cli.ts live` process on this machine, whoever started it. */
+  scanBots?: () => number[];
   now?: () => number;
   /** How long to watch a freshly started bot for an immediate crash. */
   settleMs?: number;
@@ -64,6 +66,30 @@ function defaultAlive(pid: number): boolean {
   } catch {
     return true; // no /proc (not Linux): trust the signal probe
   }
+}
+
+/**
+ * Every process running `... cli.ts live ...`, found through /proc. This is what stops a second bot being started
+ * next to one that was launched by hand or by an older version (which does not write live.json).
+ */
+export function scanLiveBots(): number[] {
+  const out: number[] = [];
+  let names: string[];
+  try {
+    names = readdirSync("/proc");
+  } catch {
+    return out; // no /proc (not Linux): the pid file and live.json still guard
+  }
+  for (const n of names) {
+    if (!/^\d+$/.test(n) || Number(n) === process.pid) continue;
+    try {
+      const args = readFileSync(`/proc/${n}/cmdline`, "utf8").split("\0");
+      if (args.some((a) => a.endsWith("cli.ts")) && args.includes("live")) out.push(Number(n));
+    } catch {
+      /* the process ended while we looked */
+    }
+  }
+  return out;
 }
 
 export class BotControl {
@@ -136,13 +162,17 @@ export class BotControl {
     const pidAlive = info !== null && alive(info.pid);
     const liveT = typeof live?.t === "string" ? Date.parse(live.t) : NaN;
     const liveFresh = Number.isFinite(liveT) && this.now() - liveT < 10_000;
-    const running = pidAlive || liveFresh;
+    const scanned = (this.o.scanBots ?? scanLiveBots)();
+    const running = pidAlive || liveFresh || scanned.length > 0;
+    // A bot that is running but writes no live.json is an older version: it cannot hear the End button.
+    const legacy = !pidAlive && !liveFresh && scanned.length > 0;
     const liveEnds = typeof live?.endsAt === "number" ? live.endsAt : null;
     return {
       enabled: true,
       running,
-      startedBy: pidAlive ? "dashboard" : liveFresh ? "external" : null,
-      pid: pidAlive ? info!.pid : liveFresh && typeof live?.pid === "number" ? live.pid : null,
+      startedBy: pidAlive ? "dashboard" : liveFresh || legacy ? "external" : null,
+      legacy,
+      pid: pidAlive ? info!.pid : liveFresh && typeof live?.pid === "number" ? live.pid : scanned[0] ?? null,
       endsAt: pidAlive && info!.endsAt ? info!.endsAt : liveEnds,
       stopRequested: existsSync(this.paths.stopFile),
       killFile: existsSync(this.paths.killFile),
@@ -159,7 +189,11 @@ export class BotControl {
       return { ok: false, code: 400, error: `Thời gian chạy phải từ 1 đến ${MAX_MINUTES} phút.` };
     }
     const dryRun = b.dryRun === true;
-    if (this.status(live).running) return { ok: false, code: 409, error: "Bot đang chạy. Kết thúc phiên hiện tại trước khi bắt đầu phiên mới." };
+    const now = this.status(live);
+    if (now.running) {
+      const who = now.pid ? ` (PID ${String(now.pid)})` : "";
+      return { ok: false, code: 409, error: `Phát hiện bot đang chạy${who}. Kết thúc phiên hiện tại trước khi bắt đầu phiên mới.` };
+    }
     if (existsSync(this.paths.killFile)) return { ok: false, code: 409, error: `File ${this.paths.killFile} đang tồn tại (khóa khẩn cấp). Xóa nó rồi thử lại.` };
     if (!existsSync(resolve(this.o.cwd, this.o.envFile))) return { ok: false, code: 400, error: `Không thấy file khóa ${this.o.envFile}. Chạy dashboard với --env-file đúng đường dẫn.` };
     const cfg = this.summary() as { error?: string };
@@ -208,7 +242,8 @@ export class BotControl {
     if (!this.status(live).running) return { ok: false, code: 409, error: "Không thấy bot đang chạy." };
     mkdirSync(dirname(this.paths.stopFile), { recursive: true });
     writeFileSync(this.paths.stopFile, new Date(this.now()).toISOString());
-    return { ok: true };
+    const st = this.status(live);
+    return st.legacy ? { ok: true, legacy: true, pid: st.pid } : { ok: true };
   }
 }
 

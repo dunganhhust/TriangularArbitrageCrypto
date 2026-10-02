@@ -43,6 +43,7 @@ function make(over: Record<string, unknown> = {}, now = () => T0) {
         return { pid: 4321, unref() {} };
       },
       isAlive: () => alive,
+      scanBots: () => [],
       now,
       settleMs: 0,
       ...over,
@@ -132,6 +133,39 @@ describe("start", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it("refuses to start next to a bot it did not launch and cannot see in live.json (an older version)", async () => {
+    const c = make({ scanBots: () => [555] });
+    const r = await c.start({ minutes: 10 }, null);
+    expect(r).toMatchObject({ ok: false, code: 409 });
+    expect((r as { error: string }).error).toContain("PID 555");
+    expect(calls).toHaveLength(0);
+    expect(c.status(null)).toMatchObject({ running: true, legacy: true, startedBy: "external", pid: 555 });
+  });
+
+  it("a bot that is writing live.json is not 'legacy'; End on a legacy one still writes STOP but says it may not listen", async () => {
+    const fresh = { t: new Date(T0 - 1_000).toISOString(), pid: 600 };
+    expect(make({ scanBots: () => [600] }).status(fresh)).toMatchObject({ running: true, legacy: false });
+    const c = make({ scanBots: () => [555] });
+    expect(c.stop(null)).toEqual({ ok: true, legacy: true, pid: 555 });
+    expect(existsSync(join(dir, "state", "STOP"))).toBe(true);
+  });
+
+  it("the /proc scan finds a real `cli.ts live` process and ignores a dashboard one", async () => {
+    const { scanLiveBots } = await import("../src/dashboard/control.js");
+    const { spawn } = await import("node:child_process");
+    const live = spawn("sh", ["-c", "sleep 30", "src/cli.ts", "live", "config.json"], { stdio: "ignore" });
+    const dash = spawn("sh", ["-c", "sleep 30", "src/cli.ts", "dashboard", "config.json"], { stdio: "ignore" });
+    try {
+      await new Promise((r) => setTimeout(r, 200));
+      const found = scanLiveBots();
+      expect(found).toContain(live.pid);
+      expect(found).not.toContain(dash.pid);
+    } finally {
+      live.kill();
+      dash.kill();
+    }
+  });
+
   it("refuses with the KILL file present, a missing key file, or a broken config", async () => {
     writeFileSync(join(dir, "state", "KILL"), "");
     expect(await make().start({ minutes: 10 }, null)).toMatchObject({ ok: false, code: 409 });
@@ -196,7 +230,7 @@ describe("HTTP routes", () => {
       stopFile: join(dir, "state", "STOP"),
       priceFeed: null,
       control: control
-        ? { configPath: join(dir, "config.json"), envFile: join(dir, "env"), cwd: dir, tokenFile: join(dir, "state", "dashboard.token"), pidFile: join(dir, "state", "bot.pid"), stdoutFile: join(dir, "data", "stdout.log"), spawnFn: (cmd, args, opts) => { calls.push({ cmd, args, opts: opts as Record<string, unknown> }); return { pid: 4321, unref() {} }; }, isAlive: () => alive, settleMs: 0 }
+        ? { configPath: join(dir, "config.json"), envFile: join(dir, "env"), cwd: dir, tokenFile: join(dir, "state", "dashboard.token"), pidFile: join(dir, "state", "bot.pid"), stdoutFile: join(dir, "data", "stdout.log"), spawnFn: (cmd, args, opts) => { calls.push({ cmd, args, opts: opts as Record<string, unknown> }); return { pid: 4321, unref() {} }; }, isAlive: () => alive, scanBots: () => [], settleMs: 0 }
         : null,
     });
     servers.push(srv);
