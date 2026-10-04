@@ -7,6 +7,7 @@ import { MarketMaker, jsonLogger, setRunLogFile } from "./engine.js";
 import { DecibelExchange } from "./exchange/decibel.js";
 import { PaperExchange } from "./exchange/paper.js";
 import { runLoop, Shutdown } from "./runner.js";
+import { Supervisor, processSpawner } from "./supervisor.js";
 
 const USAGE = `usage:
   tsx src/cli.ts paper [config.json] [--hours N]     simulated venue, no network
@@ -15,7 +16,12 @@ const USAGE = `usage:
                                                      trade (env: APTOS_NODE_API_KEY MM_PRIVATE_KEY MM_SUBACCOUNT MM_OWNER).
                                                      With --minutes the run ends after N minutes: quotes are pulled and every
                                                      position is closed. Creating the STOP file does the same at any time.
+  tsx src/cli.ts supervise [config.json] [--dry-run] [--minutes N]
+                                                     24/7 mode: runs "live" and starts it again after a crash or a watchdog exit
+                                                     (growing pauses, gives up after too many restarts); never restarts after
+                                                     End / a halt. Same environment variables as live.
   tsx src/cli.ts flatten [config.json] [--dry-run]   pull quotes and close every open position now, then exit
+  tsx src/cli.ts cancel [config.json]                pull every resting quote now (positions are kept), then exit
   tsx src/cli.ts dashboard [config.json] [--port N] [--control] [--env-file PATH]
                                                      web page on 127.0.0.1 (default 8787) showing the live run; with --control it
                                                      also has Start / End buttons (needs the token in state/dashboard.token)`;
@@ -28,7 +34,7 @@ function arg(name: string): string | undefined {
 async function main(): Promise<void> {
   const [cmd, maybePath] = process.argv.slice(2);
   const path = maybePath && !maybePath.startsWith("--") ? maybePath : "config.json";
-  if (!cmd || !["paper", "check", "live", "flatten", "dashboard"].includes(cmd)) {
+  if (!cmd || !["paper", "check", "live", "flatten", "cancel", "supervise", "dashboard"].includes(cmd)) {
     console.log(USAGE);
     process.exit(1);
   }
@@ -39,6 +45,7 @@ async function main(): Promise<void> {
   const cfg = loadConfig(path);
   if (cmd === "paper") return runPaper(cfg, Number(arg("--hours") ?? 6));
   if (cmd === "dashboard") return runDashboard(cfg, path);
+  if (cmd === "supervise") return runSupervise(cfg, path);
   if (cmd === "live") setRunLogFile(cfg.engine.runLogFile, cfg.engine.logMaxBytes);
   const env = loadLiveEnv();
   const ex = new DecibelExchange({
@@ -57,6 +64,7 @@ async function main(): Promise<void> {
     process.exit(0);
   }
   if (cmd === "flatten") return runFlatten(cfg, ex, process.argv.includes("--dry-run"));
+  if (cmd === "cancel") return runCancel(cfg, ex);
   return runLive(cfg, ex, process.argv.includes("--dry-run"));
 }
 
@@ -71,6 +79,48 @@ async function runFlatten(cfg: Config, ex: DecibelExchange, dryRun: boolean): Pr
   await ex.close();
   console.log(JSON.stringify({ dryRun, before, after, ...res }, null, 2));
   process.exit(res.closed ? 0 : 3);
+}
+
+/** Pull every resting quote and report what is still listed, then exit: 0 when nothing is left, 3 otherwise. */
+async function runCancel(cfg: Config, ex: DecibelExchange): Promise<void> {
+  const names = cfg.markets.map((m) => m.name);
+  const specs = await ex.init(names);
+  const mm = new MarketMaker(cfg, ex, specs, {});
+  await mm.cancelAll();
+  const left = (await ex.listResting().catch(() => names)).filter((n) => names.includes(n));
+  await ex.close();
+  console.log(JSON.stringify({ cancelled: names, stillResting: left }, null, 2));
+  process.exit(left.length === 0 ? 0 : 3);
+}
+
+/** Runs `live` under a supervisor that restarts it after crashes; see supervisor.ts for what is and is not restarted. */
+async function runSupervise(cfg: Config, configPath: string): Promise<void> {
+  loadLiveEnv(); // fail here, once and clearly, instead of in every restarted process
+  setRunLogFile(cfg.engine.runLogFile, 0); // the supervised processes rotate the file; this one only adds a few lines
+  const minutesArg = arg("--minutes");
+  let endsAt: number | null = null;
+  if (minutesArg !== undefined) {
+    const minutes = Number(minutesArg);
+    if (!Number.isFinite(minutes) || minutes <= 0 || minutes > 10_080) {
+      console.error(`--minutes must be between 1 and 10080, got ${minutesArg}`);
+      process.exit(1);
+    }
+    endsAt = Date.now() + Math.round(minutes * 60_000);
+  }
+  // Same launcher, same flags (e.g. --import tsx), same script: the children are this program's own subcommands.
+  const spawnChild = processSpawner((command, extra) => ({ file: process.execPath, args: [...process.execArgv, process.argv[1]!, command, configPath, ...extra] }));
+  const sup = new Supervisor({
+    spawn: spawnChild,
+    stopFile: cfg.engine.stopFile,
+    killFile: cfg.engine.killSwitchFile,
+    statusFile: "state/supervisor.json",
+    log: jsonLogger,
+    endsAt,
+    liveArgs: process.argv.includes("--dry-run") ? ["--dry-run"] : [],
+  });
+  process.on("SIGINT", () => sup.requestStop());
+  process.on("SIGTERM", () => sup.requestStop());
+  process.exit(await sup.run());
 }
 
 /** Read-only page over data/run.log. Needs no keys; bound to loopback only (use an SSH tunnel to see it remotely). */
@@ -171,6 +221,7 @@ async function runLive(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promi
     network: cfg.network,
     dryRun,
     pid: process.pid,
+    supervisedAttempt: process.env.MM_SUPERVISED_ATTEMPT ? Number(process.env.MM_SUPERVISED_ATTEMPT) : null,
     endsAt: endsAt === null ? null : new Date(endsAt).toISOString(),
     marketCfg: cfg.markets.map((m) => ({ name: m.name, maxPositionUsd: m.maxPositionUsd, levelSizeUsd: m.levelSizeUsd, levels: m.levels })),
     limits: {
