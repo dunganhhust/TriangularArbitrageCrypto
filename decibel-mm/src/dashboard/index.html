@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="mm-build" content="__BUILD__">
 <title>Decibel MM Dashboard</title>
 <style>
   :root {
@@ -45,6 +46,11 @@
   select, input[type=number] { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); font: inherit; }
   input[type=number] { width: 78px; }
   label.inline { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+  .conn { position: sticky; top: 0; z-index: 20; margin: 0 0 10px; padding: 9px 14px; border-radius: 8px; border-left: 4px solid; font-weight: 600; }
+  .conn.bad { background: var(--bad-bg); border-color: var(--bad); }
+  .conn.warn { background: var(--warn-bg); border-color: var(--warn); }
+  .conn.info { background: var(--info-bg); border-color: var(--info); }
+  body.dim main, body.dim #kpis, body.dim #markets { opacity: .55; transition: opacity .3s; }
   .alerts { display: grid; gap: 6px; margin-bottom: 12px; }
   .alert { padding: 8px 12px; border-radius: 8px; border-left: 4px solid; }
   .alert.error { background: var(--bad-bg); border-color: var(--bad); }
@@ -144,6 +150,7 @@
     <div class="sub"><b>Chế độ 24/7 (tick ô "chạy liên tục"):</b> không có giờ kết thúc; nếu bot gặp lỗi hoặc mất dữ liệu thị trường thì được tự khởi động lại (tối đa 8 lần mỗi giờ, nghỉ dài dần), nhưng KHÔNG tự chạy lại sau khi tự dừng vì lỗ/khóa khẩn cấp hay sau khi bấm Kết thúc. Hết giờ, hoặc khi bấm Kết thúc, bot hủy mọi lệnh, đóng toàn bộ vị thế bằng lệnh thị trường (reduce-only, mở rộng giá giới hạn dần qua tối đa 5 lần thử) rồi thoát. Việc đóng vị thế trả phí taker. Dừng khẩn không đóng vị thế: tạo file <span class="mono">state/KILL</span>.</div>
   </div>
 
+  <div id="conn" class="conn info">Đang kết nối tới dashboard server…</div>
   <div id="alerts" class="alerts"></div>
 
   <div class="grid" id="kpis"></div>
@@ -405,7 +412,8 @@ function render(d) {
     '<tr><td colspan="3" class="muted">Không có sự kiện đáng chú ý trong khoảng này.</td></tr>'));
 
   const w = d.window;
-  setHTML("foot", esc(`${d.logLines} dòng log trong bộ nhớ · khoảng ${tfmt(w.from, w.to - w.from)} → ${tfmt(w.to, w.to - w.from)} · làm mới mỗi giây · chỉ đọc, không điều khiển bot (dừng bot: Ctrl+C hoặc tạo file state/KILL)`));
+  const sv = d.server ? ` · dashboard server pid ${d.server.pid}, chạy ${dur((d.generatedAt - d.server.startedAt) / 1000)}, RAM ${d.server.rssMb} MB, bản ${esc(d.build || "?")}` : "";
+  setHTML("foot", `${esc(`${d.logLines} dòng log đã đọc · khoảng ${tfmt(w.from, w.to - w.from)} → ${tfmt(w.to, w.to - w.from)} · làm mới mỗi giây · dừng khẩn không đóng vị thế: tạo file state/KILL`)}${sv}`);
 
   const span = Math.max(1, w.to - w.from);
   const eq = [{ xs: d.series.t, ys: d.series.equity, color: "--m0", label: "Vốn" }];
@@ -446,13 +454,16 @@ $("ctlPresets").addEventListener("click", (ev) => {
 function say(text, cls) { CTL.msg = text; CTL.msgCls = cls || ""; CTL.msgAt = Date.now(); const m = $("ctlMsg"); m.textContent = text; m.className = cls || ""; }
 async function post(path, body) {
   CTL.busy = true; if (lastData) renderControl(lastData);
+  const ac = new AbortController();
+  const deadline = setTimeout(() => ac.abort(), 30000);
   try {
-    const res = await fetch(path, { method: "POST", headers: { "content-type": "application/json", "x-mm-token": TOKEN }, body: JSON.stringify(body || {}) });
+    const res = await fetch(path, { method: "POST", headers: { "content-type": "application/json", "x-mm-token": TOKEN }, body: JSON.stringify(body || {}), signal: ac.signal });
     const j = await res.json().catch(() => ({ ok: false, error: "Phản hồi không hợp lệ (HTTP " + res.status + ")" }));
     return j;
   } catch (err) {
-    return { ok: false, error: "Không gọi được dashboard server: " + (err.message || err) };
+    return { ok: false, error: err && err.name === "AbortError" ? "Dashboard server không trả lời trong 30 giây. Kiểm tra bot rồi thử lại (lệnh có thể đã được nhận)." : "Không gọi được dashboard server: " + (err.message || err) };
   } finally {
+    clearTimeout(deadline);
     CTL.busy = false;
     refresh();
   }
@@ -589,9 +600,42 @@ for (const id of ["c-equity", "c-pos", "c-vol", "c-apt"]) {
 
 // ---- polling (every second) ------------------------------------------------------------------
 let busy = false;
+// ---- connection handling ---------------------------------------------------------------------
+// The page is reached through a tunnel that can drop, hang half-open, or come back after the server restarted with new code.
+// Every request has a deadline (a hung fetch used to leave the page frozen for ever), failures back off and say so, the last
+// data stays on screen (dimmed), and a changed build reloads the page by itself.
+const MY_BUILD = (document.querySelector('meta[name="mm-build"]') || {}).content || "";
+const WANT_API = Number("__API__") || 0;
+const CONN = { fails: 0, okAt: 0, timer: null, why: "" };
+const hhmm = (ms) => new Date(ms).toLocaleTimeString("vi-VN", { hour12: false });
+function showConn(html, cls) {
+  const e = $("conn");
+  e.className = "conn " + (cls || "info") + (html ? "" : " hidden");
+  if (e.innerHTML !== html) e.innerHTML = html;
+  document.body.classList.toggle("dim", cls === "bad" && !!html);
+}
+function reloadOnce() {
+  try {
+    const t = Number(sessionStorage.getItem("mm.reloadAt") || 0);
+    if (Date.now() - t < 15000) return false;
+    sessionStorage.setItem("mm.reloadAt", String(Date.now()));
+  } catch (e) { return false; } // cannot remember that we already reloaded: do not risk a loop
+  location.reload();
+  return true;
+}
+const nextDelay = () => (CONN.fails === 0 ? 1000 : Math.min(15000, 1000 * 2 ** Math.min(CONN.fails, 4)));
+function schedule(ms) { clearTimeout(CONN.timer); CONN.timer = setTimeout(tick, ms); }
+async function tick() {
+  if (document.hidden) return schedule(2000);
+  await refresh();
+  schedule(nextDelay());
+}
 async function refresh() {
   if (busy) return;
   busy = true;
+  const ac = new AbortController();
+  const deadline = setTimeout(() => ac.abort(), 8000);
+  let data = null;
   try {
     const q = new URLSearchParams();
     const rs = rangeSec();
@@ -599,22 +643,44 @@ async function refresh() {
     if (S.market) q.set("market", S.market);
     if (RUN) q.set("run", RUN);
     if (!S.aptAuto) q.set("apt", String(S.apt));
-    const res = await fetch("/api/data?" + q, { cache: "no-store" });
+    const res = await fetch("/api/data?" + q, { cache: "no-store", signal: ac.signal });
     if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = await res.json();
-    if (!Array.isArray(data.markets) || !data.window) throw new Error("tiến trình dashboard trên máy ảo là bản cũ (chưa khởi động lại sau khi cập nhật mã). Tắt nó (kill) rồi chạy lại lệnh dashboard");
+    data = await res.json();
+    if (!Array.isArray(data.markets) || !data.window) throw new Error("dashboard server trả về dữ liệu của một phiên bản cũ");
+  } catch (err) {
+    CONN.fails++;
+    CONN.why = err && err.name === "AbortError" ? "không trả lời trong 8 giây" : String((err && err.message) || err);
+    const wait = Math.round(nextDelay() / 1000);
+    if (CONN.fails >= 2 || !CONN.okAt || (err && err.name === "AbortError")) { // a request that hung for 8 s is already worth saying so
+      showConn(`Mất kết nối tới dashboard server (${esc(CONN.why)}). Đang thử lại sau ${wait} giây, lần ${CONN.fails}.` +
+        (CONN.okAt ? ` Số liệu bên dưới là của lúc ${hhmm(CONN.okAt)}, không còn cập nhật.` : "") +
+        ` <span class="sub">Nếu kéo dài: đường hầm SSH đã rớt hoặc dịch vụ dashboard đang khởi động lại; trang sẽ tự nối lại.</span>`, "bad");
+    }
+    return;
+  } finally {
+    clearTimeout(deadline);
+    busy = false;
+  }
+  CONN.fails = 0;
+  CONN.okAt = Date.now();
+  if (WANT_API && data.api !== undefined && data.api !== WANT_API) {
+    showConn(`Trang (API v${WANT_API}) và tiến trình dashboard trên máy ảo (API v${data.api}) khác phiên bản. Khởi động lại dịch vụ: <span class="mono">sudo systemctl restart decibel-dashboard</span>, rồi tải lại trang.`, "warn");
+  } else if (MY_BUILD && data.build && data.build !== MY_BUILD) {
+    if (!reloadOnce()) showConn("Có bản trang mới. Nhấn F5 để tải lại.", "warn");
+    else return;
+  } else showConn("", "info");
+  try {
     render(data);
   } catch (err) {
-    setHTML("alerts", `<div class="alert error">Không lấy được dữ liệu từ dashboard server: ${esc(err.message || err)}. Kiểm tra tiến trình dashboard và đường hầm SSH.</div>`);
-  } finally {
-    busy = false;
+    console.error(err);
+    showConn(`Lỗi khi hiển thị dữ liệu: ${esc(String((err && err.message) || err))}`, "warn");
   }
 }
 syncControls();
-refresh();
-setInterval(() => { if (!document.hidden) refresh(); }, 1000);
-document.addEventListener("visibilitychange", () => { if (!document.hidden) refresh(); });
-window.addEventListener("resize", () => { if (lastData) render(lastData); });
+schedule(0);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) schedule(0); });
+window.addEventListener("online", () => { CONN.fails = 0; schedule(0); });
+window.addEventListener("resize", () => { if (lastData) { try { render(lastData); } catch (e) { /* the next poll shows it */ } } });
 </script>
 </body>
 </html>

@@ -1,6 +1,14 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, statSync } from "node:fs";
-import { parseLog } from "./analyze.js";
+import { LogIndex, parseLog } from "./analyze.js";
 import type { LogLine } from "./analyze.js";
+
+export interface LogTailOpts {
+  /**
+   * Also keep every parsed line in a plain array for {@link LogTail.read}. The dashboard server does not: it reads the
+   * index, which holds only what the page shows and so stays small over weeks of 24/7 logging. Default true.
+   */
+  keepLines?: boolean;
+}
 
 /**
  * Follows the bot's JSON-lines log. The first read takes only the last `initialBytes` of the file;
@@ -9,6 +17,8 @@ import type { LogLine } from "./analyze.js";
  */
 export class LogTail {
   private lines: LogLine[] = [];
+  private idx = new LogIndex();
+  private readonly keepLines: boolean;
   private offset = 0;
   private ino = -1;
   private started = false;
@@ -17,13 +27,27 @@ export class LogTail {
     private readonly file: string,
     private readonly initialBytes = 24_000_000,
     private readonly maxLines = 150_000,
-  ) {}
+    opts: LogTailOpts = {},
+  ) {
+    this.keepLines = opts.keepLines ?? true;
+  }
 
-  /** All lines of the latest run seen so far. The array is replaced, never mutated, between calls. */
+  /** Every line seen so far (up to `maxLines`). The array is replaced, never mutated, between calls. */
   read(): LogLine[] {
+    this.poll();
+    return this.lines;
+  }
+
+  /** The incrementally built index over the same lines: what the dashboard analyses. */
+  readIndex(): LogIndex {
+    this.poll();
+    return this.idx;
+  }
+
+  private poll(): void {
     if (!existsSync(this.file)) {
       this.reset();
-      return this.lines;
+      return;
     }
     const st = statSync(this.file);
     if (st.ino !== this.ino || st.size < this.offset) {
@@ -40,14 +64,14 @@ export class LogTail {
         skip = nl >= 0 ? nl + 1 : buf.length; // drop the line the cut landed in
       }
       this.consume(buf.subarray(skip), this.offset + skip);
-      return this.lines;
+      return;
     }
     if (st.size > this.offset) this.consume(this.slice(this.offset, st.size), this.offset);
-    return this.lines;
   }
 
   private reset(): void {
     this.lines = [];
+    this.idx = new LogIndex();
     this.offset = 0;
     this.ino = -1;
     this.started = false;
@@ -75,8 +99,12 @@ export class LogTail {
     const fresh = parseLog(buf.subarray(0, end + 1).toString("utf8"));
     this.offset = at + end + 1;
     if (!fresh.length) return;
-    const all = this.lines.concat(fresh);
-    this.lines = all.length > this.maxLines ? all.slice(all.length - this.maxLines) : all;
+    this.idx.add(fresh);
+    this.idx.trim(this.maxLines);
+    if (this.keepLines) {
+      const all = this.lines.concat(fresh);
+      this.lines = all.length > this.maxLines ? all.slice(all.length - this.maxLines) : all;
+    }
   }
 }
 

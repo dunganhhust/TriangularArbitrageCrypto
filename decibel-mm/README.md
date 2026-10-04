@@ -138,16 +138,40 @@ also works for a bot started by hand. Safety of the buttons:
 - Start is refused while a bot is running (seen via its pid file or a fresh `live.json`), while `state/KILL` exists, or
   if the key file or config is missing or invalid.
 
-## Keeping the dashboard reachable
+## Keeping the dashboard alive and reachable
 
 The page is reached through an SSH tunnel, and two different things can make it "die":
 
 - **The tunnel** (Cloud Shell closes, the SSH session drops). Symptom: "Unable to forward your request to a backend". Check on
   the VM with `curl -s localhost:8787/healthz`: `ok` means the dashboard is fine. Use a tunnel that reconnects itself:
   `while true; do gcloud compute ssh <vm> --zone <zone> -- -N -L 8080:localhost:8787 -o ServerAliveInterval=20 -o ServerAliveCountMax=3 -o ExitOnForwardFailure=yes; sleep 3; done`
-- **The dashboard process** (a crash, a reboot of the VM). Run it as a service: see `deploy/decibel-dashboard.service`
+- **The dashboard process** (a crash, a reboot of the VM, a hang). Run it as a service: see `deploy/decibel-dashboard.service`
   (install steps in its header). The unit sets `KillMode=process` on purpose: a bot started from the buttons is a child of the
-  dashboard, and the default would kill it, with its orders still resting, whenever the service restarts.
+  dashboard, and the default would kill it, with its orders still resting, whenever the service restarts. It also sets
+  `StartLimitIntervalSec=0` (systemd never gives up restarting it) and `--max-rss-mb 700` (it restarts itself if its memory
+  stays above that for 30 s). `decibel-dashboard-health.timer` probes `/healthz` every minute and restarts the dashboard after
+  three failed tries in a row, which catches a hung process that systemd still sees as running. None of this touches the bot.
+
+What keeps it cheap and steady over weeks of 24/7 logging:
+
+- **Incremental log index** (`src/dashboard/logindex.ts`). Every log line is looked at once, when it arrives, and filed under the
+  few lists the page needs (statuses, fills, ladders, notable events, ...); lines the page never shows are not kept, and the
+  order-book detail of old ladders is dropped. A request slices those lists by time instead of re-scanning the log: an
+  hour-window answer took 225 ms on 25 days of log before and about 1 ms now, and memory is bounded (`LogTail` keeps about
+  150,000 retained lines, trimming the oldest runs first).
+- **Shared, compressed answers.** Identical `/api/data` queries share one answer for 700 ms (several tabs cost no more than one),
+  gzip-compressed (about 10x smaller through the tunnel), and the ladder rows no longer carry the order book the page never shows.
+- **A page that survives the tunnel.** Every request has an 8 s deadline (a half-open tunnel used to leave the page frozen for ever),
+  failures back off 2/4/8/15 s with a banner saying so while the last data stays on screen, dimmed, and polling resumes by itself
+  when the server answers again. The page carries a build id: when the server restarts with a new page it reloads itself once, and
+  when page and server speak different API versions it says so (`sudo systemctl restart decibel-dashboard`) instead of failing in
+  some random place.
+- **Self-description.** `GET /healthz` is a bare `ok`; `GET /healthz?deep=1` returns JSON (uptime, memory, event-loop delay, log size,
+  age of the last log line, live-file age, price feed age, build and API version). The page footer shows the server's pid, uptime,
+  memory and build.
+- **A fixed address from Windows.** `deploy/windows/dashboard-tunnel.bat` (or `.ps1`) opens the tunnel from your own PC to
+  `http://localhost:8787` and reopens it whenever it drops. Unlike Cloud Shell's preview address, that origin never changes, so the
+  browser keeps the control token and the page settings.
 
 ## Running 24/7
 

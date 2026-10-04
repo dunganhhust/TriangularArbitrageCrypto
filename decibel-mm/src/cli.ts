@@ -154,15 +154,30 @@ async function runDashboard(cfg: Config, configPath: string): Promise<void> {
   // The dashboard only reads files and answers HTTP: an unexpected error in one request must not take it down.
   process.on("unhandledRejection", (e) => console.error("dashboard: unhandled rejection (continuing)", e));
   process.on("uncaughtException", (e) => console.error("dashboard: uncaught exception (continuing)", e));
-  await startDashboard({
+  const maxRssMb = Number(arg("--max-rss-mb") ?? 700);
+  const server = await startDashboard({
     port,
+    // A dashboard that has grown past its budget restarts itself (the service manager brings it straight back; the bot is a
+    // separate process and is not touched).
+    guard: Number.isFinite(maxRssMb) && maxRssMb > 0 ? { maxRssMb, onTrip: (why) => { console.error(`dashboard: restarting itself: ${why}`); process.exit(1); } } : undefined,
     logFile: cfg.engine.runLogFile,
     liveFile: cfg.engine.liveFile,
     killFile: cfg.engine.killSwitchFile,
     stopFile: cfg.engine.stopFile,
     supervisorFile: "state/supervisor.json",
     control: control ? { ...control, cwd: process.cwd(), tokenFile: "state/dashboard.token", pidFile: "state/bot.pid", stdoutFile: "data/stdout.log" } : null,
+  }).catch((e: NodeJS.ErrnoException) => {
+    if (e.code === "EADDRINUSE") console.error(`dashboard: port ${port} is already in use (another dashboard is running; stop it, or pass --port)`);
+    else console.error("dashboard: could not start", e);
+    return process.exit(1);
   });
+  const stop = (): void => {
+    server.close(() => process.exit(0));
+    server.closeAllConnections?.();
+    setTimeout(() => process.exit(0), 1500).unref(); // last resort if something keeps the server open
+  };
+  process.on("SIGTERM", stop);
+  process.on("SIGINT", stop);
   console.log(`dashboard: http://localhost:${port}  (reads ${cfg.engine.runLogFile}; Ctrl+C to stop)`);
   if (control) console.log("điều khiển: BẬT (nút Bắt đầu / Kết thúc). Mã truy cập nằm trong state/dashboard.token (chỉ chủ tài khoản đọc được)");
 }

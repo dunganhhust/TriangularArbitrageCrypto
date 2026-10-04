@@ -27,11 +27,33 @@ Các con số chi phí là ước tính từ 1 giờ đo cũ. Bot tự nới gi�
 
 ```bash
 sudo -u mm git -C /home/mm/TriangularArbitrageCrypto/decibel-mm pull origin claude/ecstatic-cray-akj7nm
+D=/home/mm/TriangularArbitrageCrypto/decibel-mm/deploy
+sudo cp $D/decibel-dashboard.service $D/decibel-dashboard-health.service $D/decibel-dashboard-health.timer /etc/systemd/system/
+sudo systemctl daemon-reload
 sudo systemctl restart decibel-dashboard
-curl -s localhost:8787/healthz     # phải in ra: ok
+sudo systemctl enable --now decibel-dashboard-health.timer
+curl -s "localhost:8787/healthz?deep=1"      # JSON: uptime, bộ nhớ, số dòng log, tuổi dòng log cuối
 ```
 
-Khởi động lại dịch vụ dashboard **không** làm bot đang chạy dừng (`KillMode=process`).
+Khởi động lại dịch vụ dashboard **không** làm bot đang chạy dừng (`KillMode=process`). Bộ hẹn giờ `decibel-dashboard-health.timer`
+kiểm tra `/healthz` mỗi phút và tự khởi động lại dashboard nếu nó treo (3 lần liền không trả lời). Xem trạng thái:
+`systemctl status decibel-dashboard decibel-dashboard-health.timer --no-pager`.
+
+### Mở dashboard ổn định từ máy Windows (khuyên dùng thay Cloud Shell)
+
+Cloud Shell hết phiên là mất đường hầm, địa chỉ xem trước đổi, và trình duyệt quên mã điều khiển. Dùng đường hầm từ chính máy bạn:
+
+1. Cài Google Cloud CLI cho Windows: https://cloud.google.com/sdk/docs/install (mở "Google Cloud SDK Shell" sau khi cài), rồi `gcloud auth login`
+   và `gcloud config set project <tên-dự-án-của-bạn>`. Windows 10/11 thường đã có sẵn OpenSSH client.
+2. Chép file `decibel-mm/deploy/windows/dashboard-tunnel.bat` và `dashboard-tunnel.ps1` (cùng thư mục) về máy, bấm đúp vào `.bat`.
+3. Cửa sổ đen hiện "Mo duong ham lan 1", vài giây sau trình duyệt tự mở `http://localhost:8787`. **Giữ cửa sổ đó mở.** Rớt mạng/ngủ máy thì
+   nó tự mở lại đường hầm sau 3 giây; trang tự nối lại. Địa chỉ luôn là `http://localhost:8787` nên trình duyệt nhớ mã điều khiển.
+4. Muốn lấy mã điều khiển lần đầu: trong "Google Cloud SDK Shell" chạy
+   `gcloud compute ssh decibel-mm --zone=asia-southeast1-b --command="sudo cat /home/mm/TriangularArbitrageCrypto/decibel-mm/state/dashboard.token"`
+   rồi dán vào ô "Mã điều khiển" (đừng chụp màn hình có mã).
+
+Nếu trang hiện thanh đỏ "Mất kết nối tới dashboard server": đường hầm rớt hoặc dịch vụ đang khởi động lại; đừng làm gì, trang tự nối lại
+(số liệu cũ vẫn hiện, mờ đi). Nếu thanh đỏ kéo dài trên 2 phút, kiểm tra trên máy ảo `systemctl status decibel-dashboard`.
 
 ## 2. Đặt cấu hình 24/7
 
@@ -114,3 +136,5 @@ lệnh thay thế hiện công khai trước khi vào khối. Không đổi nế
 | Giám sát thoát với mã 3 | Lệnh đóng vị thế bị lỗi, vị thế có thể còn mở | Mở Positions trong app, đóng tay nếu cần; file `state/STOP` được giữ lại để lần sau đóng tiếp |
 | "APT trong ví ký chỉ đủ ~N ngày" | Sắp hết gas | Nạp APT vào ví ký (địa chỉ có trong `check` → `signer`) |
 | Muốn biết còn lệnh treo không | | `node --import tsx src/cli.ts cancel config.json` hủy mọi lệnh và liệt kê lệnh còn lại |
+| Thanh vàng "Trang (API vX) và tiến trình dashboard (API vY) khác phiên bản" | Đã cập nhật mã nhưng chưa khởi động lại dịch vụ | `sudo systemctl restart decibel-dashboard`, tải lại trang |
+| Dashboard chậm hoặc ăn nhiều RAM | Hiếm: log quá lớn | `curl -s "localhost:8787/healthz?deep=1"` xem `rssMb`, `log.retained`; dashboard tự khởi động lại nếu RAM trên 700 MB quá 30 giây |

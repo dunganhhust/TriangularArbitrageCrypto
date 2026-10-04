@@ -3,6 +3,10 @@
  * shows. Pure: no I/O, the clock is passed in, so it is covered by unit tests.
  */
 
+import { LogIndex, RunIndex } from "./logindex.js";
+
+export { LogIndex };
+
 export interface LogLine {
   t: string;
   ts: number;
@@ -40,7 +44,6 @@ export interface AnalyzeOpts {
   runStart?: number | null;
 }
 
-const STOP_MSG = "shutting down, cancelling quotes";
 
 export function parseLog(text: string): LogLine[] {
   const out: LogLine[] = [];
@@ -176,33 +179,28 @@ export interface RunSummary {
   residual: Record<string, number>;
 }
 
-function attemptOf(run: LogLine[]): number | null {
-  return num(run.find((l) => l.msg === "market maker started")?.supervisedAttempt);
+function attemptOf(run: RunIndex): number | null {
+  return num(run.start?.supervisedAttempt);
 }
 
+/** Summary of one run given as plain lines (the run's own lines, start marker first). */
 export function summarizeRun(run: LogLine[], isLatest: boolean, now: number, staleMs: number, restartedAfter = false): RunSummary {
-  const start = run.find((l) => l.msg === "market maker started") ?? null;
-  const first = run[0]!;
-  const last = run[run.length - 1]!;
-  const startedAt = start?.ts ?? first.ts;
-  let fills = 0;
-  let volumeUsd = 0;
-  let firstEq: number | null = null;
-  let lastStatus: LogLine | null = null;
-  let halt: LogLine | null = null;
-  let signal = false;
-  let finished: LogLine | null = null;
-  for (const l of run) {
-    if (l.msg === "fill") {
-      fills++;
-      volumeUsd += (num(l.px) ?? 0) * (num(l.sz) ?? 0);
-    } else if (l.msg === "status") {
-      if (firstEq === null) firstEq = num(l.startEquity) ?? num(l.equity);
-      lastStatus = l;
-    } else if (l.msg === "run finished") finished = l;
-    else if (l.level === "error" && l.msg === "HALT") halt = l;
-    else if (l.msg === STOP_MSG) signal = true;
-  }
+  const r = new RunIndex(null);
+  for (const l of run) r.add(l);
+  return summarizeIdx(r, isLatest, now, staleMs, restartedAfter);
+}
+
+export function summarizeIdx(run: RunIndex, isLatest: boolean, now: number, staleMs: number, restartedAfter = false): RunSummary {
+  const start = run.start;
+  const last = run.lastLine!;
+  const startedAt = run.startedAt!;
+  const fills = run.fillCount;
+  const volumeUsd = run.fillVolume;
+  const firstEq = run.firstEq;
+  const lastStatus = run.lastStatus;
+  const halt = run.halt;
+  const signal = run.stopped;
+  const finished = run.finished;
   const equityEnd = num(lastStatus?.equity);
   const endsAtIso = typeof start?.endsAt === "string" ? Date.parse(start.endsAt) : NaN;
   let outcome: RunOutcome;
@@ -308,7 +306,6 @@ export interface DashboardData {
       hash: string | null;
       gasUsed: number | null;
       path: string | null;
-      quotes: { bids: number[][]; asks: number[][] } | null;
     }[];
   };
   events: { total: number; rows: { t: number; level: string; msg: string; market: string | null; detail: string }[] };
@@ -345,17 +342,22 @@ export interface DashboardData {
   aptPrice?: { usd: number; source: string; ts: number; ageSec: number; stale: boolean } | null;
 }
 
-export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
+/**
+ * `src` is either the plain list of lines (tests, one-off use) or a {@link LogIndex} kept up to date by the server, which
+ * is what makes a request cost the size of the window asked for instead of the size of the whole log.
+ */
+export function analyze(src: LogLine[] | LogIndex, o: AnalyzeOpts): DashboardData {
   const maxPts = o.maxSeriesPoints ?? 600;
   const maxRows = o.maxRows ?? 200;
-  const runsAll = splitRuns(all);
-  const latestRun = runsAll.length ? runsAll[runsAll.length - 1]! : [];
-  const picked = o.runStart != null ? runsAll.find((r) => (r.find((l) => l.msg === "market maker started") ?? r[0])?.ts === o.runStart) : undefined;
-  const run = picked ?? latestRun;
-  const isLatest = run === latestRun;
-  const start = run.find((l) => l.msg === "market maker started") ?? null;
-  const last = run.length ? run[run.length - 1]! : null;
-  const startedAt = start?.ts ?? run[0]?.ts ?? null;
+  const idx = src instanceof LogIndex ? src : LogIndex.from(src);
+  const runsAll = idx.all;
+  const latestRun = runsAll.length ? runsAll[runsAll.length - 1]! : null;
+  const picked = o.runStart != null ? runsAll.find((r) => r.startedAt === o.runStart) : undefined;
+  const run = picked ?? latestRun ?? new RunIndex(null);
+  const isLatest = picked === undefined || picked === latestRun;
+  const start = run.start;
+  const last = run.lastLine;
+  const startedAt = run.startedAt;
   const dryRun = start?.dryRun === true;
   const limits = rec(start?.limits);
   const marketCfg = Array.isArray(start?.marketCfg) ? (start!.marketCfg as unknown[]) : [];
@@ -374,23 +376,22 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
     }
   }
 
-  const statuses = run.filter((l) => l.msg === "status");
-  const lastStatus = statuses.length ? statuses[statuses.length - 1]! : null;
+  const lastStatus = run.lastStatus;
   const liveNewer = live !== null && liveTs !== null && (lastStatus === null || liveTs >= lastStatus.ts);
   const latest: Record<string, unknown> | null = liveNewer
     ? (({ markets: _m, ...rest }) => rest)(live as Record<string, unknown>)
     : lastStatus
       ? { ...lastStatus }
       : null;
-  const first = statuses.length ? statuses[0]! : null;
+  const first = run.firstStatus;
 
   // --- state -----------------------------------------------------------------------------------
   const lastActivity = Math.max(last?.ts ?? -Infinity, liveTs ?? -Infinity);
   const hasActivity = Number.isFinite(lastActivity);
-  const haltLine = [...run].reverse().find((l) => l.level === "error" && l.msg === "HALT") ?? null;
-  const stopped = run.some((l) => l.msg === STOP_MSG);
-  const endingLine = run.find((l) => l.msg.startsWith("run ending")) ?? null;
-  const finishedLine = [...run].reverse().find((l) => l.msg === "run finished") ?? null;
+  const haltLine = run.halt;
+  const stopped = run.stopped;
+  const endingLine = run.ending;
+  const finishedLine = run.finished;
   const finish = finishedLine
     ? {
         reason: String(finishedLine.reason ?? ""),
@@ -407,7 +408,7 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
   if (!hasActivity) {
     state = "no-data";
     detail = "Chưa có log. Hãy chạy bot (live hoặc live --dry-run).";
-  } else if (haltLine || (!stopped && run.some((l) => l.msg === "halted; exiting"))) {
+  } else if (haltLine || (!stopped && run.haltedExit)) {
     state = "halted";
     detail = `Bot tự dừng: ${String(haltLine?.reason ?? "xem Sự kiện")}`;
   } else if (finish) {
@@ -444,8 +445,8 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
   const hours = Math.max((end - from) / 3_600_000, 1e-9);
 
   // --- series (account level; positions per market) ---------------------------------------------
-  const inWindow = statuses.filter(inWin);
-  const anchor = o.rangeMs ? [...statuses].reverse().find((l) => l.ts < from) ?? null : null;
+  const inWindow = run.window("statuses", from);
+  const anchor = o.rangeMs ? run.lastBefore("statuses", from) : null;
   const pts: Record<string, unknown>[] = [...(anchor ? [{ ...anchor, ts: from }] : []), ...inWindow];
   if (live && liveTs !== null && liveNewer && liveTs >= from) pts.push({ ...live, ts: liveTs });
   const st = thin(pts, maxPts);
@@ -454,7 +455,7 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
     return v.length ? v.reduce((a, b) => a + b, 0) : null;
   };
 
-  const fillLinesAll = run.filter((l) => l.msg === "fill" && inWin(l));
+  const fillLinesAll = run.window("fills", from);
   const fillLines = mkt ? fillLinesAll.filter((l) => l.market === mkt) : fillLinesAll;
 
   const names: string[] = [];
@@ -536,11 +537,8 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
   }
 
   // --- ladders / transactions ------------------------------------------------------------------
-  const placedAll = run.filter((l) => l.msg === "ladder placed" || l.msg === "DRY-RUN place_bulk_orders");
-  const placedWin = placedAll.filter((l) => inWin(l) && (!mkt || l.market === mkt));
-  const failed = run.filter(
-    (l) => inWin(l) && (!mkt || l.market === mkt) && (l.msg === "bulk order tx failed" || l.msg === "bulk order tx error" || l.msg === "replace failed"),
-  ).length;
+  const placedWin = run.window("placed", from).filter((l) => !mkt || l.market === mkt);
+  const failed = run.window("failed", from).filter((l) => !mkt || l.market === mkt).length;
   const quotesOf = (l: LogLine): { bids: number[][]; asks: number[][] } | null => {
     const q = rec(l.quotes);
     return Array.isArray(q.bids) && Array.isArray(q.asks) ? { bids: q.bids as number[][], asks: q.asks as number[][] } : null;
@@ -562,17 +560,12 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
         hash: typeof l.hash === "string" ? l.hash : null,
         gasUsed: l.gasUsed === undefined ? null : Number(l.gasUsed),
         path: typeof l.path === "string" ? l.path : null,
-        quotes: quotesOf(l),
       })),
   };
 
   // --- events ----------------------------------------------------------------------------------
-  const notable = run.filter(
-    (l) =>
-      inWin(l) &&
-      (!mkt || l.market === undefined || l.market === mkt) &&
-      (l.level !== "info" || l.msg.startsWith("ramp:") || l.msg.startsWith("maker rebate") || l.msg === "market maker started"),
-  );
+  const ofMarket = (l: LogLine): boolean => !mkt || l.market === undefined || l.market === mkt;
+  const notable = run.window("notable", from).filter(ofMarket);
   const events = {
     total: notable.length,
     rows: notable
@@ -580,16 +573,15 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
       .reverse()
       .map((l) => ({ t: l.ts, level: l.level, msg: l.msg, market: typeof l.market === "string" ? l.market : null, detail: detailOf(l) })),
   };
-  const inWinRun = run.filter((l) => inWin(l) && (!mkt || l.market === undefined || l.market === mkt));
   const counters = {
-    warn: inWinRun.filter((l) => l.level === "warn").length,
-    error: inWinRun.filter((l) => l.level === "error").length,
-    fuseTrips: inWinRun.filter((l) => l.msg.startsWith("FUSE tripped")).length,
-    pauses: inWinRun.filter((l) => l.msg === "pause").length,
+    warn: run.window("warns", from).filter(ofMarket).length,
+    error: run.window("errors", from).filter(ofMarket).length,
+    fuseTrips: run.window("trips", from).filter(ofMarket).length,
+    pauses: run.window("pauses", from).filter(ofMarket).length,
   };
 
   // --- economics (account-wide, selected window) -----------------------------------------------
-  const base = [...statuses].reverse().find((l) => l.ts <= from) ?? null;
+  const base = run.lastBefore("statuses", from, true);
   const rebateBps = num(limits.rebateBps) ?? 0.5;
   const equityNow = num(latest?.equity);
   const equityStart = base ? num(base.equity) : (num(latest?.startEquity) ?? num(first?.equity));
@@ -634,7 +626,7 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
     const lv = rec(liveMarkets[name]);
     const cfgM = rec(marketCfg.find((m) => rec(m).name === name));
     const capBase = num(cfgM.maxPositionUsd);
-    const lastLadder = [...placedAll].reverse().find((l) => l.market === name && quotesOf(l)) ?? null;
+    const lastLadder = run.lastQuoted.get(name) ?? null;
     const liveQuotes = lv.quotes && typeof lv.quotes === "object" ? (lv.quotes as { bids: number[][]; asks: number[][] }) : null;
     const fl = fillLinesAll.filter((l) => l.market === name);
     const s = sumFills(fl);
@@ -679,7 +671,7 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
   if (state === "halted") alerts.push({ level: "error", text: `${detail}. Kiểm tra Open Orders trong app xem còn lệnh nào không.` });
   if (o.killFile) alerts.push({ level: "warn", text: "File state/KILL đang tồn tại: bot sẽ dừng và hủy lệnh (xóa file nếu muốn chạy lại)." });
   if (state === "running" && latest) {
-    const runFills = run.filter((l) => l.msg === "fill").length;
+    const runFills = run.fillCount;
     const ratio = num(latest.cycleMakerRatio);
     const minRatio = num(limits.minMakerRatio) ?? 0.8;
     if (ratio !== null && runFills >= 3 && ratio < minRatio)
@@ -706,7 +698,7 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
     if (econ !== null && econ > 1.2) alerts.push({ level: "info", text: `Chế độ tiết kiệm gas x${econ}: gas đang vượt nhịp ngân sách ngày nên bot đặt lại lệnh thưa hơn.` });
     const cross = num(latest.takerCross);
     if (cross !== null && cross > 0) alerts.push({ level: "warn", text: `${cross} lệnh đang treo bị khớp kiểu taker do giá chạy tới trước khi lệnh được ghi nhận (tự nới khoảng cách an toàn: ${num(latest.guardTicks) ?? 0} tick).` });
-    const lastTrip = [...run].reverse().find((l) => l.msg.startsWith("FUSE tripped")) ?? null;
+    const lastTrip = run.lastTrip;
     if (lastTrip) {
       const until = lastTrip.ts + (num(lastTrip.pauseSec) ?? 0) * 1000;
       if (o.now < until)
@@ -717,7 +709,7 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
 
   return {
     generatedAt: o.now,
-    logLines: all.length,
+    logLines: idx.total,
     window: { from, to: end, ms: o.rangeMs ?? null },
     market: mkt,
     run: {
@@ -737,15 +729,17 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
       remainingSec,
       finish,
     },
+    // Only the 40 newest runs are summarised: a 24/7 session can have hundreds of restarts.
     runs: runsAll
-      .map((r, i) => {
+      .slice(-40)
+      .map((r, k, part) => {
+        const i = runsAll.length - part.length + k;
         // A supervised process that ended without a closing line and was followed by the next attempt crashed and was restarted.
         const a = attemptOf(r);
         const next = i + 1 < runsAll.length ? attemptOf(runsAll[i + 1]!) : null;
-        return summarizeRun(r, i === runsAll.length - 1, o.now, o.staleMs, a !== null && next === a + 1);
+        return summarizeIdx(r, i === runsAll.length - 1, o.now, o.staleMs, a !== null && next === a + 1);
       })
-      .reverse()
-      .slice(0, 40),
+      .reverse(),
     alerts,
     config: { marketCfg, limits },
     latest,
