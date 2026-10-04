@@ -1,0 +1,43 @@
+# Runs the market maker 24/7 under its own supervisor, and starts it again after a reboot.
+#
+# This is OPTIONAL. Without it you start and end runs with the dashboard buttons ("24/7" preset = no end time).
+# Enable it only when you want the bot to trade whenever the machine is up.
+#
+# Install, as a user with sudo (NOT as `mm`):
+#   sudo cp /home/mm/TriangularArbitrageCrypto/decibel-mm/deploy/decibel-mm.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now decibel-mm        # start now and at every boot
+#   journalctl -u decibel-mm -f                    # follow it
+#
+# Stop for good (quotes pulled, positions closed):   touch /home/mm/TriangularArbitrageCrypto/decibel-mm/state/STOP
+#   (or press "Kết thúc" on the dashboard). The unit then ends cleanly and is NOT started again until the next boot or
+#   `sudo systemctl start decibel-mm`. To stop it from coming back after a reboot: `sudo systemctl disable decibel-mm`.
+# `sudo systemctl stop decibel-mm` pulls the quotes but KEEPS the positions open.
+#
+# Edit User= and the paths if the project lives elsewhere. Do not run this and a dashboard-started bot at the same
+# time: the dashboard refuses to start a second one, and the bot must be the only writer of its quotes.
+[Unit]
+Description=Decibel market maker (supervised, 24/7)
+After=network-online.target
+Wants=network-online.target
+# A restart storm is the supervisor's job to stop (it gives up after 8 starts an hour); this is a second net.
+StartLimitIntervalSec=3600
+StartLimitBurst=6
+
+[Service]
+Type=simple
+User=mm
+WorkingDirectory=/home/mm/TriangularArbitrageCrypto/decibel-mm
+# The key file is sourced by the shell, exactly as when starting by hand, so it may use `export KEY=...` or plain KEY=...
+ExecStart=/bin/bash -lc 'set -a; . /etc/decibel-mm/env; set +a; exec node --import tsx src/cli.ts supervise config.json'
+# The supervisor already restarts the bot for crashes. Restart it (the supervisor) only if IT dies abnormally.
+Restart=on-failure
+RestartSec=30
+# 2 = the bot halted itself (loss limit, kill switch, ...): needs a person. 3 = a position could not be closed.
+# 4 = the supervisor gave up after a restart storm. None of these may loop back by themselves.
+RestartPreventExitStatus=2 3 4
+# On stop the supervisor and the bot both get SIGTERM: the bot cancels its quotes (positions are kept) and exits.
+TimeoutStopSec=90
+
+[Install]
+WantedBy=multi-user.target

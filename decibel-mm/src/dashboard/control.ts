@@ -33,6 +33,8 @@ export interface ControlOpts {
   isAlive?: (pid: number) => boolean;
   /** Pids of every `cli.ts live` process on this machine, whoever started it. */
   scanBots?: () => number[];
+  /** Pids of every `cli.ts supervise` process (the 24/7 wrapper, which is alive between two bot processes too). */
+  scanSupervisors?: () => number[];
   now?: () => number;
   /** How long to watch a freshly started bot for an immediate crash. */
   settleMs?: number;
@@ -50,7 +52,10 @@ interface PidInfo {
   startedAt: number;
   minutes: number;
   dryRun: boolean;
+  /** 0 for a run without an end. */
   endsAt: number;
+  /** Started as `supervise`: runs until ended and restarts the bot after crashes. */
+  supervised?: boolean;
 }
 
 export const MAX_MINUTES = 10_080;
@@ -73,6 +78,15 @@ function defaultAlive(pid: number): boolean {
  * next to one that was launched by hand or by an older version (which does not write live.json).
  */
 export function scanLiveBots(): number[] {
+  return scanFor("live");
+}
+
+/** Every process running `... cli.ts supervise ...`. */
+export function scanSupervisors(): number[] {
+  return scanFor("supervise");
+}
+
+function scanFor(command: string): number[] {
   const out: number[] = [];
   let names: string[];
   try {
@@ -84,7 +98,7 @@ export function scanLiveBots(): number[] {
     if (!/^\d+$/.test(n) || Number(n) === process.pid) continue;
     try {
       const args = readFileSync(`/proc/${n}/cmdline`, "utf8").split("\0");
-      if (args.some((a) => a.endsWith("cli.ts")) && args.includes("live")) out.push(Number(n));
+      if (args.some((a) => a.endsWith("cli.ts")) && args.includes(command)) out.push(Number(n));
     } catch {
       /* the process ended while we looked */
     }
@@ -163,16 +177,20 @@ export class BotControl {
     const liveT = typeof live?.t === "string" ? Date.parse(live.t) : NaN;
     const liveFresh = Number.isFinite(liveT) && this.now() - liveT < 10_000;
     const scanned = (this.o.scanBots ?? scanLiveBots)();
-    const running = pidAlive || liveFresh || scanned.length > 0;
+    const supers = (this.o.scanSupervisors ?? scanSupervisors)();
+    const running = pidAlive || liveFresh || scanned.length > 0 || supers.length > 0;
     // A bot that is running but writes no live.json is an older version: it cannot hear the End button.
-    const legacy = !pidAlive && !liveFresh && scanned.length > 0;
+    // (A supervisor is current code, and is alive in the pauses between two bot processes when there is no live.json.)
+    const legacy = !pidAlive && !liveFresh && supers.length === 0 && scanned.length > 0;
     const liveEnds = typeof live?.endsAt === "number" ? live.endsAt : null;
+    const supervised = (pidAlive && info!.supervised === true) || supers.length > 0;
     return {
       enabled: true,
       running,
-      startedBy: pidAlive ? "dashboard" : liveFresh || legacy ? "external" : null,
+      supervised,
+      startedBy: pidAlive ? "dashboard" : liveFresh || legacy || supers.length > 0 ? "external" : null,
       legacy,
-      pid: pidAlive ? info!.pid : liveFresh && typeof live?.pid === "number" ? live.pid : scanned[0] ?? null,
+      pid: pidAlive ? info!.pid : liveFresh && typeof live?.pid === "number" ? live.pid : supers[0] ?? scanned[0] ?? null,
       endsAt: pidAlive && info!.endsAt ? info!.endsAt : liveEnds,
       stopRequested: existsSync(this.paths.stopFile),
       killFile: existsSync(this.paths.killFile),
@@ -184,9 +202,11 @@ export class BotControl {
 
   async start(body: unknown, live: Record<string, unknown> | null): Promise<ControlResult> {
     const b = (body && typeof body === "object" ? body : {}) as Record<string, unknown>;
-    const minutes = Number(b.minutes);
-    if (!Number.isFinite(minutes) || minutes < 1 || minutes > MAX_MINUTES) {
-      return { ok: false, code: 400, error: `Thời gian chạy phải từ 1 đến ${MAX_MINUTES} phút.` };
+    // `forever` must be asked for explicitly (a blank or zero duration is an input mistake, not a request for 24/7).
+    const forever = b.forever === true;
+    const minutes = forever ? 0 : Number(b.minutes);
+    if (!forever && (!Number.isFinite(minutes) || minutes < 1 || minutes > MAX_MINUTES)) {
+      return { ok: false, code: 400, error: `Thời gian chạy phải từ 1 đến ${MAX_MINUTES} phút (hoặc chọn chạy liên tục 24/7).` };
     }
     const dryRun = b.dryRun === true;
     const now = this.status(live);
@@ -208,7 +228,8 @@ export class BotControl {
     const out = openSync(this.o.stdoutFile, "a");
     // Absolute on purpose: bash's `.` looks a bare name such as "env" up in PATH first and would source /usr/bin/env.
     const envAbs = resolve(this.o.cwd, this.o.envFile);
-    const args = ["-c", 'set -a; . "$1"; set +a; shift; exec "$@"', "mm-dashboard", envAbs, process.execPath, "--import", "tsx", "src/cli.ts", "live", this.o.configPath, "--minutes", String(Math.round(minutes))];
+    const run = forever ? ["supervise", this.o.configPath] : ["live", this.o.configPath, "--minutes", String(Math.round(minutes))];
+    const args = ["-c", 'set -a; . "$1"; set +a; shift; exec "$@"', "mm-dashboard", envAbs, process.execPath, "--import", "tsx", "src/cli.ts", ...run];
     if (dryRun) args.push("--dry-run");
     const spawnFn = this.o.spawnFn ?? ((c: string, a: string[], p: SpawnOptions) => spawn(c, a, p));
     let child: { pid?: number; unref(): void };
@@ -220,7 +241,7 @@ export class BotControl {
     child.unref();
     if (!child.pid) return { ok: false, code: 500, error: "Không khởi động được tiến trình bot." };
     const startedAt = this.now();
-    const info: PidInfo = { pid: child.pid, startedAt, minutes: Math.round(minutes), dryRun, endsAt: startedAt + Math.round(minutes) * 60_000 };
+    const info: PidInfo = { pid: child.pid, startedAt, minutes: Math.round(minutes), dryRun, endsAt: forever ? 0 : startedAt + Math.round(minutes) * 60_000, supervised: forever };
     mkdirSync(dirname(this.o.pidFile), { recursive: true });
     writeFileSync(this.o.pidFile, JSON.stringify(info));
 
@@ -234,7 +255,7 @@ export class BotControl {
       }
       return { ok: false, code: 500, error: "Bot thoát ngay sau khi khởi động.", detail: tail };
     }
-    return { ok: true, pid: child.pid, endsAt: info.endsAt, dryRun };
+    return { ok: true, pid: child.pid, endsAt: info.endsAt || null, dryRun, supervised: forever };
   }
 
   /** Ask the running bot to end: it pulls quotes, closes every position and exits. */

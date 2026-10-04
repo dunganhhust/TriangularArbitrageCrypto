@@ -825,6 +825,9 @@ export class MarketMaker {
       gasUsd: round(s.dayGasUsd, 4),
       gasBps: s.dayVolumeUsd > 0 ? round((s.dayGasUsd / s.dayVolumeUsd) * 1e4, 3) : null,
       gasRunwayDays: this.gasRunwayDays(now, gasNow),
+      gasPerTxApt: gasNow?.byPath
+        ? { encrypted: gasNow.byPath.encrypted.avgApt === null ? null : round(gasNow.byPath.encrypted.avgApt, 6), plain: gasNow.byPath.plain.avgApt === null ? null : round(gasNow.byPath.plain.avgApt, 6), encryptedTx: gasNow.byPath.encrypted.tx, plainTx: gasNow.byPath.plain.tx }
+        : null,
       cycle: s.cycleKey,
       cycleMakerRatio: s.cycleMakerRatio === null ? null : round(s.cycleMakerRatio, 3),
       rebateEligible: s.cycleMakerRatio === null || s.cycleMakerRatio >= this.cfg.rebate.minMakerRatio,

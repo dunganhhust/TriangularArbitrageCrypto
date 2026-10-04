@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import type { Server } from "node:http";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { analyze } from "./analyze.js";
 import { BotControl } from "./control.js";
@@ -18,6 +18,8 @@ export interface DashboardOpts {
   killFile: string;
   /** Creating this file asks the bot to end the run and close every position. */
   stopFile?: string;
+  /** Status snapshot written by the 24/7 supervisor; "" or omitted = none. */
+  supervisorFile?: string;
   /** Start / End buttons. null or omitted = the page is strictly read-only. */
   control?: Omit<ControlOpts, "spawnFn" | "isAlive" | "now" | "settleMs"> & Partial<Pick<ControlOpts, "spawnFn" | "isAlive" | "now" | "settleMs">> | null;
   /** Without a live snapshot a run is "stale" after this long with no log line. */
@@ -110,6 +112,7 @@ export function startDashboard(o: DashboardOpts): Promise<Server> {
         });
         data.aptPrice = px;
         data.control = control ? control.status(liveFile.read()) : { enabled: false };
+        data.supervisor = readSupervisor(o.supervisorFile ?? "");
         return send(200, "application/json", JSON.stringify(data));
       }
       return send(404, "text/plain", "not found");
@@ -123,4 +126,29 @@ export function startDashboard(o: DashboardOpts): Promise<Server> {
     server.once("error", reject);
     server.listen(o.port, o.host ?? "127.0.0.1", () => resolve(server));
   });
+}
+
+let supCache: { file: string; mtime: number; value: Record<string, unknown> | null } | null = null;
+
+/** The supervisor's status file, with `alive` saying whether its process still exists. null when there is none. */
+function readSupervisor(file: string): Record<string, unknown> | null {
+  if (!file) return null;
+  try {
+    const mtime = statSync(file).mtimeMs;
+    if (!supCache || supCache.file !== file || supCache.mtime !== mtime) {
+      supCache = { file, mtime, value: JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown> };
+    }
+    const v = supCache.value;
+    if (!v) return null;
+    let alive = false;
+    try {
+      process.kill(Number(v.pid), 0);
+      alive = true;
+    } catch (e) {
+      alive = (e as NodeJS.ErrnoException).code === "EPERM";
+    }
+    return { ...v, alive };
+  } catch {
+    return null;
+  }
 }

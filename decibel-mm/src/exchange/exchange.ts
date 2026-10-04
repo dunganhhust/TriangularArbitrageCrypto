@@ -16,6 +16,8 @@ export interface GasStats {
   gasApt: number;
   /** Current APT balance of the signing account (it pays gas), if known. */
   balanceApt: number | null;
+  /** Gas and transaction counts split by submission path (encrypted / plain), where the venue knows them. */
+  byPath?: Record<"encrypted" | "plain", { tx: number; gasApt: number; unitPrice: number | null; avgApt: number | null }>;
 }
 
 /** What the market maker needs from a venue. Implemented by the live adapter and the simulator. */

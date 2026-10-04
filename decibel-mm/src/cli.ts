@@ -146,6 +146,7 @@ async function runDashboard(cfg: Config, configPath: string): Promise<void> {
     liveFile: cfg.engine.liveFile,
     killFile: cfg.engine.killSwitchFile,
     stopFile: cfg.engine.stopFile,
+    supervisorFile: "state/supervisor.json",
     control: control ? { ...control, cwd: process.cwd(), tokenFile: "state/dashboard.token", pidFile: "state/bot.pid", stdoutFile: "data/stdout.log" } : null,
   });
   console.log(`dashboard: http://localhost:${port}  (reads ${cfg.engine.runLogFile}; Ctrl+C to stop)`);

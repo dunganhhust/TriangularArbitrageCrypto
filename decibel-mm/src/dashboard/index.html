@@ -128,9 +128,9 @@
     <h2>Điều khiển phiên chạy</h2>
     <div id="ctlStatus"></div>
     <div class="ctl">
-      <label class="inline">Thời gian chạy <input id="ctlMin" type="number" min="1" max="10080" step="1" value="120"> phút</label>
+      <label class="inline">Thời gian chạy <input id="ctlMin" type="number" min="0" max="10080" step="1" value="120"> phút <span class="muted">(0 = chạy liên tục 24/7)</span></label>
       <span class="seg" id="ctlPresets">
-        <button data-m="30">30 phút</button><button data-m="60">1 giờ</button><button data-m="120">2 giờ</button><button data-m="360">6 giờ</button><button data-m="1440">24 giờ</button>
+        <button data-m="30">30 phút</button><button data-m="60">1 giờ</button><button data-m="120">2 giờ</button><button data-m="360">6 giờ</button><button data-m="1440">24 giờ</button><button data-m="0">24/7</button>
       </span>
       <label class="inline"><input id="ctlDry" type="checkbox"> chạy thử (không gửi giao dịch)</label>
       <button id="btnStart" class="btn go" disabled>▶ Bắt đầu</button>
@@ -140,7 +140,7 @@
       <label class="inline">Mã điều khiển <input id="ctlToken" type="password" autocomplete="off" placeholder="dán nội dung file state/dashboard.token"></label>
       <span id="ctlMsg"></span>
     </div>
-    <div class="sub">Hết giờ, hoặc khi bấm Kết thúc, bot hủy mọi lệnh, đóng toàn bộ vị thế bằng lệnh thị trường (reduce-only, mở rộng giá giới hạn dần qua tối đa 5 lần thử) rồi thoát. Việc đóng vị thế trả phí taker. Dừng khẩn không đóng vị thế: tạo file <span class="mono">state/KILL</span>.</div>
+    <div class="sub"><b>Chế độ 24/7 (0 phút):</b> không có giờ kết thúc; nếu bot gặp lỗi hoặc mất dữ liệu thị trường thì được tự khởi động lại (tối đa 8 lần mỗi giờ, nghỉ dài dần), nhưng KHÔNG tự chạy lại sau khi tự dừng vì lỗ/khóa khẩn cấp hay sau khi bấm Kết thúc. Hết giờ, hoặc khi bấm Kết thúc, bot hủy mọi lệnh, đóng toàn bộ vị thế bằng lệnh thị trường (reduce-only, mở rộng giá giới hạn dần qua tối đa 5 lần thử) rồi thoát. Việc đóng vị thế trả phí taker. Dừng khẩn không đóng vị thế: tạo file <span class="mono">state/KILL</span>.</div>
   </div>
 
   <div id="alerts" class="alerts"></div>
@@ -278,7 +278,7 @@ function render(d) {
   // Run history: selector and table
   const OUT = {
     running: ["Đang chạy", "good"], closed: ["", "good"], residual: ["CÒN vị thế chưa đóng", "bad"],
-    halted: ["Bot tự dừng", "bad"], signal: ["Dừng bằng tín hiệu (giữ vị thế)", "warn"], unknown: ["Không có dòng kết thúc", "muted"],
+    halted: ["Bot tự dừng", "bad"], restarted: ["Lỗi, bot đã tự khởi động lại", "warn"], signal: ["Dừng bằng tín hiệu (giữ vị thế)", "warn"], unknown: ["Không có dòng kết thúc", "muted"],
   };
   const outText = (x) => {
     if (x.outcome === "closed") return (x.reason === "deadline" ? "Hết giờ" : x.reason === "stop" ? "Bấm Kết thúc" : "Kết thúc") + " · đã đóng vị thế";
@@ -296,7 +296,7 @@ function render(d) {
   rsel.value = RUN;
   if (RUN && !runs.some((x) => String(x.id) === RUN)) RUN = "";
   setHTML("runs", '<tr><th>Bắt đầu</th><th>Thời lượng</th><th>Chế độ</th><th>Thị trường</th><th class="r">Lệnh khớp</th><th class="r">Khối lượng</th><th class="r">Δ vốn</th><th class="r">Gas (APT)</th><th>Kết quả</th></tr>' +
-    (runs.map((x, i) => `<tr data-run="${x.id}" class="${String(r.id) === String(x.id) ? "sel" : ""}"><td>${dm(x.startedAt)}${i === 0 ? ' <span class="tag t-info">mới nhất</span>' : ""}</td><td>${dur((x.endedAt - x.startedAt) / 1000)}${x.plannedMinutes ? ` <span class="muted">/ ${x.plannedMinutes}p</span>` : ""}</td><td>${x.dryRun ? "thử" : "thật"}</td><td>${esc(x.markets.join(", "))}</td><td class="r">${x.fills}</td><td class="r">${fmt(x.volumeUsd)}</td><td class="r ${cls(x.equityDelta)}">${sgn(x.equityDelta, 3)}</td><td class="r">${fmt(x.gasApt, 5)}</td><td class="${OUT[x.outcome][1]}">${esc(outText(x))}</td></tr>`).join("") ||
+    (runs.map((x, i) => `<tr data-run="${x.id}" class="${String(r.id) === String(x.id) ? "sel" : ""}"><td>${dm(x.startedAt)}${i === 0 ? ' <span class="tag t-info">mới nhất</span>' : ""}${isNum(x.attempt) && x.attempt > 1 ? ` <span class="muted">lần ${x.attempt}</span>` : ""}</td><td>${dur((x.endedAt - x.startedAt) / 1000)}${x.plannedMinutes ? ` <span class="muted">/ ${x.plannedMinutes}p</span>` : ""}</td><td>${x.dryRun ? "thử" : "thật"}</td><td>${esc(x.markets.join(", "))}</td><td class="r">${x.fills}</td><td class="r">${fmt(x.volumeUsd)}</td><td class="r ${cls(x.equityDelta)}">${sgn(x.equityDelta, 3)}</td><td class="r">${fmt(x.gasApt, 5)}</td><td class="${OUT[x.outcome][1]}">${esc(outText(x))}</td></tr>`).join("") ||
       '<tr><td colspan="9" class="muted">Chưa có phiên nào trong log.</td></tr>'));
 
   const banner = r.isLatest === false ? `<div class="alert info">Đang xem lại phiên cũ bắt đầu lúc ${dm(r.startedAt)}. Số liệu bên dưới thuộc phiên đó, không phải bot hiện tại. <a href="#" id="backLatest">Quay về phiên mới nhất</a></div>` : "";
@@ -327,6 +327,12 @@ function render(d) {
   k.push(card("Gas (APT)", isNum(e.gasApt) ? fmt(e.gasApt, 5) : "–", "",
     `${rangeText()} · ${isNum(e.txCount) ? e.txCount : "–"} tx · ≈ ${fmt(e.gasUsd, 4)} USD<br>cả phiên ${fmt(e.gasAptRun, 5)} APT · ví ký ${fmt(e.aptBalance, 4)} APT` +
     `${isNum(e.aptRunwayHours) ? "<br>đủ ~" + fmt(e.aptRunwayHours, 0) + " giờ" : ""}`));
+  const reasons = L.replaces ? Object.entries(L.replaces).filter(([, n]) => n > 0).map(([a, n]) => `${({ initial: "đầu", threat: "bị đe dọa", drift: "giá chạy", fill: "sau khớp", stale: "định kỳ" })[a] || a} ${n}`).join(" · ") : "";
+  k.push(card("Đặt lại lệnh & chi phí", isNum(L.replacesLastHour) ? `${L.replacesLastHour} lần / giờ` : "–", "",
+    `gas ${isNum(L.gasBps) ? fmt(L.gasBps, 2) + " bps" : "–"} · ${isNum(L.gasUsd) ? fmt(L.gasUsd, 4) : "–"} USD hôm nay${isNum(L.economy) && L.economy > 1.05 ? ` · <span class="warn">tiết kiệm x${L.economy}</span>` : ""}<br>` +
+    `${reasons || "chưa có"}<br>taker: ${isNum(L.takerReduce) ? L.takerReduce : "–"} do đóng vị thế · <span class="${L.takerCross ? "warn" : ""}">${isNum(L.takerCross) ? L.takerCross : "–"} do giá chạy tới</span>${L.guardTicks ? ` (cách xa ${L.guardTicks} tick)` : ""}` +
+    `${L.gasPerTxApt && (L.gasPerTxApt.encryptedTx || L.gasPerTxApt.plainTx) ? `<br>gas/tx: mã hóa ${isNum(L.gasPerTxApt.encrypted) ? fmt(L.gasPerTxApt.encrypted, 6) : "–"} APT (${L.gasPerTxApt.encryptedTx} tx) · thường ${isNum(L.gasPerTxApt.plain) ? fmt(L.gasPerTxApt.plain, 6) : "–"} APT (${L.gasPerTxApt.plainTx} tx)` : ""}` +
+    `${isNum(L.gasRunwayDays) ? `<br>APT đủ ~${fmt(L.gasRunwayDays, 1)} ngày` : ""}`));
   k.push(card("An toàn", `ramp ${isNum(L.rampStage) ? L.rampStage : "–"} · ${isNum(L.sizeMult) ? "x" + L.sizeMult : ""}`, "",
     `cầu chì ngắt ${d.counters.fuseTrips} lần · tạm dừng ${d.counters.pauses} · cảnh báo ${d.counters.warn} · lỗi ${d.counters.error} (${rangeText()})`));
   setHTML("kpis", k.join(""));
@@ -420,14 +426,14 @@ const CTL = { busy: false, msg: "", msgCls: "" };
 let TOKEN = "";
 try { TOKEN = localStorage.getItem("mm.token") || ""; } catch (e) { /* ignore */ }
 $("ctlToken").value = TOKEN;
-$("ctlMin").value = S.ctlMin || 120;
+$("ctlMin").value = S.ctlMin === 0 ? 0 : S.ctlMin || 120;
 $("ctlDry").checked = !!S.ctlDry;
 $("ctlToken").addEventListener("input", () => {
   TOKEN = $("ctlToken").value.trim();
   try { localStorage.setItem("mm.token", TOKEN); } catch (e) { /* ignore */ }
   if (lastData) renderControl(lastData);
 });
-$("ctlMin").addEventListener("change", () => { S.ctlMin = Math.min(10080, Math.max(1, Math.round(Number($("ctlMin").value) || 120))); $("ctlMin").value = S.ctlMin; save(); });
+$("ctlMin").addEventListener("change", () => { const v = Number($("ctlMin").value); S.ctlMin = v === 0 ? 0 : Math.min(10080, Math.max(1, Math.round(v || 120))); $("ctlMin").value = S.ctlMin; save(); });
 $("ctlDry").addEventListener("change", () => { S.ctlDry = $("ctlDry").checked; save(); });
 $("ctlPresets").addEventListener("click", (ev) => {
   const b = ev.target.closest("button");
@@ -450,14 +456,19 @@ async function post(path, body) {
 }
 $("btnStart").addEventListener("click", async () => {
   const c = lastData && lastData.control;
-  const minutes = Math.min(10080, Math.max(1, Math.round(Number($("ctlMin").value) || 0)));
-  if (!minutes) return say("Nhập thời gian chạy (phút).", "bad");
+  const raw = Number($("ctlMin").value);
+  const forever = raw === 0;
+  const minutes = forever ? 0 : Math.min(10080, Math.max(1, Math.round(raw || 0)));
+  if (!forever && !minutes) return say("Nhập thời gian chạy (phút), hoặc 0 để chạy liên tục 24/7.", "bad");
   const dry = $("ctlDry").checked;
   const cfg = c && c.config && c.config.markets ? c.config.markets.map((m) => `${m.name} (vị thế tối đa ${m.maxPositionUsd} USD, mỗi mức ${m.levelSizeUsd} USD)`).join("\n  ") : "";
-  const ok = confirm(`${dry ? "CHẠY THỬ (không gửi giao dịch)" : "CHẠY THẬT trên " + (c && c.config ? c.config.network : "mainnet")} trong ${minutes} phút.\n\n  ${cfg}\n\nHết giờ bot sẽ hủy lệnh và đóng toàn bộ vị thế. Tiếp tục?`);
+  const what = dry ? "CHẠY THỬ (không gửi giao dịch)" : "CHẠY THẬT trên " + (c && c.config ? c.config.network : "mainnet");
+  const ok = confirm(forever
+    ? `${what} LIÊN TỤC 24/7, không có giờ kết thúc.\n\n  ${cfg}\n\nBot tự khởi động lại khi gặp lỗi; chỉ dừng khi bạn bấm Kết thúc (hủy lệnh, đóng vị thế), khi chạm giới hạn lỗ, hoặc khi cần người xử lý. Tiếp tục?`
+    : `${what} trong ${minutes} phút.\n\n  ${cfg}\n\nHết giờ bot sẽ hủy lệnh và đóng toàn bộ vị thế. Tiếp tục?`);
   if (!ok) return;
   say("Đang khởi động bot…", "muted");
-  const j = await post("/api/control/start", { minutes, dryRun: dry });
+  const j = await post("/api/control/start", forever ? { forever: true, dryRun: dry } : { minutes, dryRun: dry });
   say(j.ok ? `Đã khởi động (PID ${j.pid}). Chờ bot ghi log đầu tiên…` : j.error + (j.detail ? "\n" + j.detail : ""), j.ok ? "good" : "bad");
 });
 $("btnStop").addEventListener("click", async () => {
@@ -474,7 +485,11 @@ function renderControl(d) {
   let st;
   if (c.running) {
     const who = c.startedBy === "dashboard" ? "bắt đầu từ dashboard" : "bắt đầu bên ngoài dashboard";
-    st = `<b class="good">Bot đang chạy</b> (PID ${c.pid ?? "?"}, ${who})` +
+    const sv = d.supervisor && d.supervisor.alive ? d.supervisor : null;
+    const svTxt = !c.supervised ? "" : sv
+      ? ` · <b>chế độ 24/7</b>: ${sv.state === "backoff" ? `<span class="warn">đang chờ khởi động lại lúc ${hhmmss(sv.nextStartAt)}</span>` : sv.state === "running" ? "giám sát đang chạy" : esc(sv.state)}, đã khởi động lại ${sv.restarts} lần${sv.lastExit && sv.lastExit.code !== 0 ? ` (lần thoát gần nhất: ${sv.lastExit.code === null ? esc(sv.lastExit.signal) : "mã " + sv.lastExit.code} lúc ${hhmmss(sv.lastExit.at)})` : ""}`
+      : " · chế độ 24/7";
+    st = `<b class="good">Bot đang chạy</b> (PID ${c.pid ?? "?"}, ${who})${svTxt}` +
       (isNum(r.remainingSec) ? ` · còn <b>${dur(r.remainingSec)}</b>, hết giờ lúc ${hhmmss(r.endsAt)}` : " · không đặt giờ kết thúc") +
       (c.stopRequested || r.state === "finishing" ? ' · <b class="warn">đang kết thúc và đóng vị thế</b>' : "");
   } else {

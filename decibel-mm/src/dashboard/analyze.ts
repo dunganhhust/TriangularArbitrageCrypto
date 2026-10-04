@@ -151,7 +151,7 @@ export interface FillRow {
   fee: number;
 }
 
-export type RunOutcome = "running" | "closed" | "residual" | "halted" | "signal" | "unknown";
+export type RunOutcome = "running" | "closed" | "residual" | "halted" | "signal" | "restarted" | "unknown";
 
 /** One line of the run history: enough to recognise a run and see how it ended. */
 export interface RunSummary {
@@ -162,6 +162,8 @@ export interface RunSummary {
   dryRun: boolean;
   markets: string[];
   plannedMinutes: number | null;
+  /** 1 for the first process of a supervised (24/7) session, 2 for the one started after a crash, ... null when not supervised. */
+  attempt: number | null;
   fills: number;
   volumeUsd: number;
   equityStart: number | null;
@@ -174,7 +176,11 @@ export interface RunSummary {
   residual: Record<string, number>;
 }
 
-export function summarizeRun(run: LogLine[], isLatest: boolean, now: number, staleMs: number): RunSummary {
+function attemptOf(run: LogLine[]): number | null {
+  return num(run.find((l) => l.msg === "market maker started")?.supervisedAttempt);
+}
+
+export function summarizeRun(run: LogLine[], isLatest: boolean, now: number, staleMs: number, restartedAfter = false): RunSummary {
   const start = run.find((l) => l.msg === "market maker started") ?? null;
   const first = run[0]!;
   const last = run[run.length - 1]!;
@@ -210,6 +216,7 @@ export function summarizeRun(run: LogLine[], isLatest: boolean, now: number, sta
     outcome = "halted";
     reason = String(halt.reason ?? "");
   } else if (signal) outcome = "signal";
+  else if (restartedAfter) outcome = "restarted";
   else if (isLatest && now - last.ts <= staleMs) outcome = "running";
   else outcome = "unknown";
   return {
@@ -219,6 +226,7 @@ export function summarizeRun(run: LogLine[], isLatest: boolean, now: number, sta
     dryRun: start?.dryRun === true,
     markets: Array.isArray(start?.markets) ? (start!.markets as unknown[]).map(String) : [],
     plannedMinutes: Number.isFinite(endsAtIso) ? Math.round((endsAtIso - startedAt) / 60_000) : null,
+    attempt: attemptOf(run),
     fills,
     volumeUsd,
     equityStart: firstEq,
@@ -331,6 +339,8 @@ export interface DashboardData {
   };
   /** Filled in by the server: whether the Start/End buttons exist and the bot's process state. */
   control?: unknown;
+  /** Status file of the 24/7 supervisor, if one has run here. */
+  supervisor?: Record<string, unknown> | null;
   /** Filled in by the server. */
   aptPrice?: { usd: number; source: string; ts: number; ageSec: number; stale: boolean } | null;
 }
@@ -688,6 +698,14 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
       const p = rec(liveMarkets[m]).paused ?? rec(latest.paused)[m];
       if (typeof p === "string") alerts.push({ level: "warn", text: `${m} đang tạm dừng báo giá: ${p}` });
     }
+    if (latest.phase === "paused")
+      alerts.push({ level: "error", text: "Đã chạm giới hạn lỗ trong ngày: bot đã đóng vị thế và đứng ngoài thị trường đến hết ngày UTC, rồi sẽ tự giao dịch lại." });
+    const runway = num(latest.gasRunwayDays);
+    if (runway !== null && runway < 3) alerts.push({ level: runway < 1 ? "error" : "warn", text: `APT trong ví ký chỉ đủ ~${runway} ngày gas ở tốc độ hiện tại. Nạp thêm APT.` });
+    const econ = num(latest.economy);
+    if (econ !== null && econ > 1.2) alerts.push({ level: "info", text: `Chế độ tiết kiệm gas x${econ}: gas đang vượt nhịp ngân sách ngày nên bot đặt lại lệnh thưa hơn.` });
+    const cross = num(latest.takerCross);
+    if (cross !== null && cross > 0) alerts.push({ level: "warn", text: `${cross} lệnh đang treo bị khớp kiểu taker do giá chạy tới trước khi lệnh được ghi nhận (tự nới khoảng cách an toàn: ${num(latest.guardTicks) ?? 0} tick).` });
     const lastTrip = [...run].reverse().find((l) => l.msg.startsWith("FUSE tripped")) ?? null;
     if (lastTrip) {
       const until = lastTrip.ts + (num(lastTrip.pauseSec) ?? 0) * 1000;
@@ -719,7 +737,15 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
       remainingSec,
       finish,
     },
-    runs: runsAll.map((r, i) => summarizeRun(r, i === runsAll.length - 1, o.now, o.staleMs)).reverse().slice(0, 40),
+    runs: runsAll
+      .map((r, i) => {
+        // A supervised process that ended without a closing line and was followed by the next attempt crashed and was restarted.
+        const a = attemptOf(r);
+        const next = i + 1 < runsAll.length ? attemptOf(runsAll[i + 1]!) : null;
+        return summarizeRun(r, i === runsAll.length - 1, o.now, o.staleMs, a !== null && next === a + 1);
+      })
+      .reverse()
+      .slice(0, 40),
     alerts,
     config: { marketCfg, limits },
     latest,

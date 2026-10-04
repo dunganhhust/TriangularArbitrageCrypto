@@ -21,6 +21,7 @@ import type { LiveEnv } from "../config.js";
 import type { AccountInfo, Book, BookLevel, Fill, Ladder, MarketSpec, PointsSnapshot, PriceInfo } from "../types.js";
 import type { Exchange, GasStats, ReduceRequest } from "./exchange.js";
 import { feeWindow, inferFee } from "./fees.js";
+import { GasMeter } from "./gasmeter.js";
 
 type Units = "human" | "chain";
 
@@ -221,8 +222,7 @@ export class DecibelExchange implements Exchange {
   private szUnits = new Map<string, Units>();
   private seq = new Map<string, number>();
   private timers: NodeJS.Timeout[] = [];
-  private txCount = 0;
-  private gasOctas = 0;
+  private readonly gas = new GasMeter();
   private balanceApt: number | null = null;
   private positionsOkAt: number | null = null;
   private accountOkAt: number | null = null;
@@ -245,10 +245,7 @@ export class DecibelExchange implements Exchange {
     this.write = new MMWrite(this.config, account, {
       nodeApiKey: env.nodeApiKey,
       defaultEncrypted: (this.o.encrypted ?? "auto") !== "off",
-      onTransactionSettled: (m) => {
-        this.txCount++;
-        this.gasOctas += (m.gasUsed ?? 0) * (m.gasUnitPrice ?? 0);
-      },
+      onTransactionSettled: (m) => this.gas.record(m),
     });
     this.write.subaccount = env.subaccount;
 
@@ -405,7 +402,7 @@ export class DecibelExchange implements Exchange {
   }
 
   getGas(): GasStats {
-    return { txCount: this.txCount, gasApt: this.gasOctas / 1e8, balanceApt: this.balanceApt };
+    return { txCount: this.gas.txCount, gasApt: this.gas.gasApt, balanceApt: this.balanceApt, byPath: this.gas.byPath() };
   }
 
   private async refreshPositions(): Promise<void> {

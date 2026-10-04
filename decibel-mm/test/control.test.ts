@@ -44,6 +44,7 @@ function make(over: Record<string, unknown> = {}, now = () => T0) {
       },
       isAlive: () => alive,
       scanBots: () => [],
+      scanSupervisors: () => [],
       now,
       settleMs: 0,
       ...over,
@@ -107,6 +108,30 @@ describe("start", () => {
   it("the shell snippet really exports the file's variables to the command it execs", () => {
     const out = execFileSync("bash", ["-c", 'set -a; . "$1"; set +a; shift; exec "$@"', "t", join(dir, "env"), "sh", "-c", 'printf %s "$APTOS_NODE_API_KEY"'], { encoding: "utf8" });
     expect(out).toBe("x");
+  });
+
+  it("starts the 24/7 supervisor only when asked for it explicitly, with no end time", async () => {
+    const c = make();
+    const r = await c.start({ forever: true }, null);
+    expect(r).toMatchObject({ ok: true, pid: 4321, endsAt: null, supervised: true });
+    const { args } = calls[0]!;
+    expect(args.slice(args.indexOf("src/cli.ts"))).toEqual(["src/cli.ts", "supervise", join(dir, "config.json")]);
+    expect(JSON.parse(readFileSync(join(dir, "state", "bot.pid"), "utf8"))).toMatchObject({ pid: 4321, supervised: true, endsAt: 0 });
+    const st = c.status(null);
+    expect(st).toMatchObject({ running: true, supervised: true, endsAt: null, startedBy: "dashboard" });
+  });
+
+  it("a supervisor started by hand or by the service counts as a running bot, even with no live.json", () => {
+    const c = make({ scanSupervisors: () => [777] }, () => T0);
+    alive = false;
+    const st = c.status(null);
+    expect(st).toMatchObject({ running: true, supervised: true, legacy: false, pid: 777, startedBy: "external" });
+  });
+
+  it("a bare old-style bot without live.json is still flagged as legacy", () => {
+    const c = make({ scanBots: () => [888] });
+    alive = false;
+    expect(c.status(null)).toMatchObject({ running: true, legacy: true, supervised: false });
   });
 
   it("can start a dry run", async () => {
