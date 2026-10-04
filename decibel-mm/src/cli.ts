@@ -70,6 +70,9 @@ async function main(): Promise<void> {
 
 /** Pull quotes and close every position, then exit: 0 when flat, 3 when something could not be closed. */
 async function runFlatten(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promise<void> {
+  // systemd (or a supervisor) sends SIGTERM when a service stops; leaving positions half closed because of it would be
+  // the wrong reading of "stop". Ctrl+C (SIGINT) still aborts.
+  process.on("SIGTERM", () => jsonLogger("warn", "flatten: SIGTERM ignored while closing positions"));
   const names = cfg.markets.map((m) => m.name);
   const specs = await ex.init(names);
   const mm = new MarketMaker(cfg, ex, specs, {});

@@ -165,6 +165,19 @@ describe("Supervisor", () => {
     expect(h.spawned).toHaveLength(1);
   });
 
+  it("a signal while a one-off flatten is closing positions lets it finish instead of killing it", async () => {
+    const h = harness({ backoffMs: [60_000] });
+    const done = h.sup.run();
+    (await h.child(1)).exit({ code: 1, signal: null });
+    h.files.add("STOP");
+    const flat = await h.child(2);
+    expect(flat.command).toBe("flatten");
+    h.sup.requestStop();
+    expect(flat.killed).toEqual([]); // not signalled
+    flat.exit({ code: 0, signal: null });
+    expect(await done).toBe(0);
+  });
+
   it("a signal during the pause before a restart ends supervision without starting another bot", async () => {
     const h = harness({ backoffMs: [120_000] });
     const done = h.sup.run();

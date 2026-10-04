@@ -89,6 +89,7 @@ export class Supervisor {
     this.signalStop = r;
   });
   private child: Child | null = null;
+  private childKind: "live" | "flatten" | "cancel" | null = null;
   private status: SupervisorStatus;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
@@ -137,7 +138,9 @@ export class Supervisor {
     this.stopping = true;
     this.set({ state: "stopping", detail: "signal received" });
     this.signalStop();
-    this.child?.kill("SIGTERM");
+    // `live` turns SIGTERM into "pull the quotes, keep the positions". A one-off flatten/cancel is already doing what a
+    // stop would want and must be allowed to finish (it is killed after the grace period if it hangs).
+    if (this.childKind === "live") this.child?.kill("SIGTERM");
   }
 
   snapshot(): SupervisorStatus {
@@ -180,8 +183,10 @@ export class Supervisor {
     this.o.log("warn", `supervisor: running ${command}`);
     const c = this.o.spawn(command, [], attempt);
     this.child = c;
+    this.childKind = command;
     const exit = await this.waitFor(c);
     this.child = null;
+    this.childKind = null;
     return exit.code ?? 1;
   }
 
@@ -228,11 +233,13 @@ export class Supervisor {
       if (remaining !== null) args.push("--minutes", String(Math.max(1, Math.ceil(remaining / 60_000))));
       const child = this.o.spawn("live", args, attempt);
       this.child = child;
+      this.childKind = "live";
       this.set({ state: "running", starts: attempt, restarts: attempt - 1, childPid: child.pid ?? null, childStartedAt: t, nextStartAt: null, detail: null });
       this.o.log("info", attempt === 1 ? "supervisor: started the bot" : "supervisor: restarted the bot", { pid: child.pid, attempt });
 
       const exit = await this.waitFor(child);
       this.child = null;
+      this.childKind = null;
       const ranMs = this.now() - t;
       this.set({ childPid: null, lastExit: { code: exit.code, signal: exit.signal, at: this.now(), ranMs } });
       this.o.log(exit.code === 0 ? "info" : "warn", "supervisor: the bot exited", { code: exit.code, signal: exit.signal, ranSec: Math.round(ranMs / 1000) });
