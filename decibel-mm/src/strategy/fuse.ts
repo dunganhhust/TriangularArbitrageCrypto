@@ -26,8 +26,11 @@ export interface FuseConfig {
   /** After the pause quotes return `recoverWiden`x wider, decaying linearly to 1x over this long. */
   recoverMs: number;
   recoverWiden: number;
-  /** Stop for good after this many trips within an hour. */
+  /** Stop for good (or cool off, see `haltMode`) after this many trips within an hour. */
   haltAfterTripsPerHour: number;
+  /** "halt": the engine halts. "cooloff": quotes stay off for `cooloffMs`, the trip history is forgotten, trading resumes. */
+  haltMode?: "halt" | "cooloff";
+  cooloffMs?: number;
   /** Toxic-flow trip: this many recent fills averaging worse than -toxicMarkoutBps. */
   toxicFills: number;
   toxicMarkoutBps: number;
@@ -93,11 +96,17 @@ export class VolatilityFuse {
     if (this.haltReason) return { state: "halt", reason: this.haltReason };
     this.trips = this.trips.filter((t) => now - t < HOUR);
     this.trips.push(now);
+    let cooldown = Math.min(this.cfg.maxCooldownMs, this.cfg.cooldownMs * 2 ** (this.trips.length - 1));
     if (this.trips.length >= this.cfg.haltAfterTripsPerHour) {
-      this.haltReason = `${this.trips.length} fuse trips within an hour (last: ${reason})`;
-      return { state: "halt", reason: this.haltReason };
+      const text = `${this.trips.length} fuse trips within an hour (last: ${reason})`;
+      if (this.cfg.haltMode !== "cooloff") {
+        this.haltReason = text;
+        return { state: "halt", reason: this.haltReason };
+      }
+      cooldown = this.cfg.cooloffMs ?? 3_600_000;
+      this.trips = [];
+      reason = `${text}; cooling off ${Math.round(cooldown / 60_000)} min`;
     }
-    const cooldown = Math.min(this.cfg.maxCooldownMs, this.cfg.cooldownMs * 2 ** (this.trips.length - 1));
     this.until = now + cooldown;
     this.recoverUntil = this.until + this.cfg.recoverMs;
     this.reason = reason;

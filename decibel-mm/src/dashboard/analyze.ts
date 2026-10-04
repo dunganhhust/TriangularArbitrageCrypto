@@ -637,7 +637,7 @@ export function analyze(all: LogLine[], o: AnalyzeOpts): DashboardData {
       spreadBps: num(lv.spreadBps),
       position: num(lv.position) ?? num(rec(latest?.positions)[name]),
       positionUsd: num(lv.positionUsd) ?? num(rec(latest?.positionsUsd)[name]),
-      capUsd: capBase !== null ? capBase * sizeMult : null,
+      capUsd: num(lv.capUsd) ?? (capBase !== null ? capBase * sizeMult : null),
       quoting: typeof lv.quoting === "boolean" ? lv.quoting : typeof rec(latest?.quoting)[name] === "boolean" ? (rec(latest?.quoting)[name] as boolean) : null,
       paused: typeof pausedLive === "string" ? pausedLive : typeof rec(latest?.paused)[name] === "string" ? (rec(latest?.paused)[name] as string) : null,
       fuse: typeof lv.fuse === "string" ? lv.fuse : null,

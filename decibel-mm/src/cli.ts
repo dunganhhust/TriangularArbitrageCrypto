@@ -1,6 +1,7 @@
 import { existsSync, statSync, unlinkSync } from "node:fs";
 import { loadConfig, loadLiveEnv } from "./config.js";
 import type { Config } from "./config.js";
+import { PriceFeed } from "./dashboard/price.js";
 import { startDashboard } from "./dashboard/server.js";
 import { MarketMaker, jsonLogger, setRunLogFile } from "./engine.js";
 import { DecibelExchange } from "./exchange/decibel.js";
@@ -193,10 +194,17 @@ async function runLive(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promi
   }
 
   const specs = await ex.init(cfg.markets.map((m) => m.name));
+  // Gas is paid in APT; its dollar value lets the controllers weigh it against edge. A dead feed just means "unknown".
+  const aptFeed = cfg.gas.priceFeed ? new PriceFeed({ everyMs: 30_000 }) : null;
+  aptFeed?.start();
   const mm = new MarketMaker(cfg, ex, specs, {
     persist: true,
     killSwitch: () => existsSync(cfg.engine.killSwitchFile),
     endsAt,
+    aptUsd: () => {
+      const r = aptFeed?.get();
+      return r && !r.stale ? r.usd : null;
+    },
   });
   const shutdown = new Shutdown({ haltAll: () => mm.haltAll(), close: () => ex.close(), exit: (c) => process.exit(c), log: jsonLogger });
   process.on("SIGINT", () => void shutdown.onSignal("SIGINT"));

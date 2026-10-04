@@ -1,6 +1,6 @@
 import type { Config } from "../config.js";
 import type { AccountInfo, Book, BookLevel, Fill, Ladder, MarketSpec, PriceInfo } from "../types.js";
-import type { Exchange, ReduceRequest } from "./exchange.js";
+import type { Exchange, GasStats, ReduceRequest } from "./exchange.js";
 
 /** Deterministic PRNG (mulberry32). */
 export function rng(seed: number): () => number {
@@ -172,6 +172,11 @@ export class PaperExchange implements Exchange {
   getFees(): { maker: number; taker: number } {
     return { maker: this.cfg.makerFeeBps / 1e4, taker: this.cfg.takerFeeBps / 1e4 };
   }
+  /** Gas is modelled only when `paper.gasAptPerTx` is set; otherwise the venue reports none (as before). */
+  getGas(): GasStats | null {
+    if (!this.cfg.gasAptPerTx) return null;
+    return { txCount: this.txCount, gasApt: this.txCount * this.cfg.gasAptPerTx, balanceApt: null };
+  }
   getPosition(market: string): number {
     return this.sim(market).position;
   }
@@ -194,6 +199,7 @@ export class PaperExchange implements Exchange {
     return this.replaceLadder(market, { bids: [], asks: [] });
   }
   async reduce(req: ReduceRequest): Promise<boolean> {
+    this.txCount++;
     const s = this.sim(req.market);
     const q = this.marketQuotes(s);
     const px = req.side === "buy" ? q.ask : q.bid;

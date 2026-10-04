@@ -39,6 +39,19 @@ export const configSchema = z.object({
        * between the slow scheduled refreshes, which is what bots watching the price pick off.
        */
       urgentRepriceBps: z.number().positive().default(6),
+      /** Bounds (bps) for the economic reprice threshold below. */
+      urgentMinBps: z.number().positive().default(2),
+      urgentMaxBps: z.number().positive().default(10),
+      /**
+       * Chance that a stale quote gets hit once the price has moved through it. With the APT price known, the
+       * immediate-reprice threshold becomes half-spread + (gas of one transaction in bps of the top level) / this,
+       * within [urgentMinBps, urgentMaxBps]: the drift at which the expected loss from a stale quote starts to
+       * exceed the gas of fixing it. Bigger levels (or cheaper gas, or a wide spread) re-quote sooner or later
+       * accordingly; tiny levels wait. 0 = off (always `urgentRepriceBps`).
+       */
+      staleFillProb: z.number().min(0).max(1).default(0.3),
+      /** While gas runs ahead of its daily budget, thresholds and refresh intervals are stretched by up to this factor. */
+      economyMaxMult: z.number().min(1).default(3),
       /** Randomise each refresh interval by +/- this fraction so the cadence is not predictable. */
       jitterPct: z.number().min(0).max(0.9).default(0.2),
       volWindowMs: z.number().int().positive().default(60_000),
@@ -89,6 +102,43 @@ export const configSchema = z.object({
       minGasBalanceApt: z.number().nonnegative().default(0.05),
       /** Stop quoting for the rest of the UTC day once this much APT of gas has been spent. */
       maxGasAptPerDay: z.number().positive().default(0.5),
+      /**
+       * Absolute floor on account equity (USD): below it the bot halts. Unlike `maxDrawdownUsd` (measured from the
+       * start of each process) this survives restarts, which is what an unattended run needs. 0 = off.
+       */
+      minEquityUsd: z.number().nonnegative().default(0),
+      /**
+       * Daily loss limit (USD, from the first equity seen each UTC day): past it every position is closed and the bot
+       * stays flat until the next UTC day, then resumes by itself. 0 = off.
+       */
+      maxDailyLossUsd: z.number().nonnegative().default(0),
+    })
+    .default({}),
+
+  /**
+   * Size the book from the account instead of fixed numbers. With `leverage` > 0 the cap on |position| is
+   * equity x leverage split over the markets and the level size is `levelFraction` of that cap; the per-market
+   * `maxPositionUsd` / `levelSizeUsd` stay as ceilings (set them high to let volume follow deposits). Losses
+   * therefore shrink the book by themselves and a deposit grows it, with no config edit. 0 = fixed sizes.
+   */
+  sizing: z
+    .object({
+      leverage: z.number().nonnegative().default(0),
+      levelFraction: z.number().gt(0).max(1).default(0.33),
+      /** Re-derive the sizes only when equity moved by more than this fraction since the last time (avoids churn). */
+      rebalanceTol: z.number().positive().default(0.1),
+    })
+    .default({}),
+
+  /** Gas pricing for the cost controls. Gas is paid in APT; the bot needs its dollar value to weigh it against edge. */
+  gas: z
+    .object({
+      /** Poll public APT/USD quotes (Coinbase, Kraken, ...). Without a price gas is not weighed in the controllers. */
+      priceFeed: z.boolean().default(true),
+      /** USD per APT to use when no quote is available; 0 = unknown. */
+      aptUsdFallback: z.number().nonnegative().default(0),
+      /** APT per transaction to assume until enough transactions were observed. */
+      assumedAptPerTx: z.number().positive().default(0.0006),
     })
     .default({}),
 
@@ -107,6 +157,12 @@ export const configSchema = z.object({
       recoverMs: z.number().int().positive().default(300_000),
       recoverWiden: z.number().min(1).default(2),
       haltAfterTripsPerHour: z.number().int().positive().default(6),
+      /**
+       * What too many trips mean: "halt" ends the process (a human restarts it), "cooloff" pulls quotes for
+       * `cooloffMs`, forgets the trips and carries on (wider for a while). Unattended runs use "cooloff".
+       */
+      haltMode: z.enum(["halt", "cooloff"]).default("halt"),
+      cooloffMs: z.number().int().positive().default(3_600_000),
       toxicFills: z.number().int().positive().default(5),
       toxicMarkoutBps: z.number().positive().default(3),
     })
@@ -145,6 +201,17 @@ export const configSchema = z.object({
       improveTicks: z.number().int().nonnegative().default(0),
       /** Fallback fee if the venue does not report it. */
       makerFeeBps: z.number().nonnegative().default(1.5),
+      /**
+       * Quotes stay this many ticks away from the opposite touch (0 = may sit right at it). A quote that the book
+       * reaches before the transaction lands can execute as a taker, which costs the taker fee and the maker ratio.
+       */
+      touchGuardTicks: z.number().int().min(0).default(0),
+      /**
+       * Raise the guard by itself: one extra tick for every `crossesPerTick` resting-order taker fills in the last
+       * hour, up to `maxGuardTicks`. 0 = off.
+       */
+      crossesPerTick: z.number().int().min(0).default(3),
+      maxGuardTicks: z.number().int().min(0).default(2),
     })
     .default({}),
 
@@ -178,6 +245,8 @@ export const configSchema = z.object({
       makerFeeBps: z.number().default(1.1),
       takerFeeBps: z.number().default(3.4),
       equityUsd: z.number().positive().default(5_000),
+      /** Gas per transaction in APT; 0 = the simulated venue reports no gas. */
+      gasAptPerTx: z.number().nonnegative().default(0),
       seed: z.number().int().default(42),
       /** Optional price shock for testing the fuse: jump `shockPct` percent at `shockAtSec`. */
       shockAtSec: z.number().nonnegative().optional(),

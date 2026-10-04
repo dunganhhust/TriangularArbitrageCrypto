@@ -43,6 +43,8 @@ export interface PointsStats {
   dayMakerVolumeUsd: number;
   dayTakerVolumeUsd: number;
   dayFeesUsd: number;
+  /** Gas paid today, in USD (0 while the APT price is unknown). */
+  dayGasUsd: number;
   /** EWMA realized PnL per notional in bps (spread capture + markout - fees). Positive = earning. */
   ewmaPnlBps: number;
   ewmaSampleUsd: number;
@@ -79,6 +81,7 @@ export class PointsController {
   private dayMaker = 0;
   private dayTaker = 0;
   private dayFees = 0;
+  private dayGas = 0;
   private ewmaNum = 0; // sum of pnlUsd, decayed
   private ewmaDen = 0; // sum of notional, decayed
   private now = 0;
@@ -120,6 +123,17 @@ export class PointsController {
     }
     this.dayFees += fill.feeUsd;
     this.pending.push({ fill, refMid });
+  }
+
+  /**
+   * Gas is part of what the volume costs: it goes into the same average the spread controller reads, so quotes
+   * widen when fees + adverse selection + gas together exceed the budget, not just the first two.
+   */
+  onGasCost(usd: number, ts: number): void {
+    if (!(usd > 0)) return;
+    this.rollDay(ts);
+    this.dayGas += usd;
+    this.ewmaNum -= usd;
   }
 
   /** Resolve fills whose markout horizon elapsed; call with the current mid for each market. */
@@ -175,7 +189,7 @@ export class PointsController {
     const key = utcDayKey(ts);
     if (key !== this.day) {
       this.day = key;
-      this.dayVol = this.dayMaker = this.dayTaker = this.dayFees = 0;
+      this.dayVol = this.dayMaker = this.dayTaker = this.dayFees = this.dayGas = 0;
     }
   }
 
@@ -230,6 +244,7 @@ export class PointsController {
       dayMakerVolumeUsd: this.dayMaker,
       dayTakerVolumeUsd: this.dayTaker,
       dayFeesUsd: this.dayFees,
+      dayGasUsd: this.dayGas,
       ewmaPnlBps: this.ewmaDen > 0 ? (this.ewmaNum / this.ewmaDen) * 1e4 : 0,
       ewmaSampleUsd: this.ewmaDen,
       spreadMult: this.mult,

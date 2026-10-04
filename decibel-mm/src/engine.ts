@@ -8,12 +8,14 @@ import { PointsController } from "./strategy/points.js";
 import { RampController } from "./strategy/ramp.js";
 import {
   buildLadder,
+  halfSpreadBps,
   isLadderThreatened,
   microprice,
   needsReplace,
   roundDownToStep,
   stripOwn,
   topDriftBps,
+  topLevelUsd,
 } from "./strategy/quoter.js";
 import type { QuoteParams } from "./strategy/quoter.js";
 import { assess } from "./strategy/risk.js";
@@ -44,7 +46,10 @@ export const jsonLogger: Logger = (level, msg, extra) => {
 interface MarketState {
   spec: MarketSpec;
   cfg: MarketConfig;
+  /** The ladder we believe is resting: what was sent, less what has been filled since. */
   live: Ladder | null;
+  /** The ladder exactly as last sent. Staleness is judged against this, so that a filled level does not look like drift. */
+  placed: Ladder | null;
   lastReplaceAt: number;
   /** Jittered minimum gap before the next scheduled (non-urgent) replace. */
   nextInterval: number;
@@ -57,6 +62,10 @@ interface MarketState {
   /** Most recent fuse verdict, for the live snapshot. */
   fuseStatus: FuseStatus;
   warnedTooSmall: boolean;
+  /** Drift (bps) at which this market re-quotes at once, as last computed. */
+  urgentBps: number;
+  /** Position cap and first-level size (USD) in force at the last step. */
+  sizeNow: { maxPos: number; level: number } | null;
 }
 
 export interface EngineOpts {
@@ -71,7 +80,15 @@ export interface EngineOpts {
   endsAt?: number | null;
   /** Pause between position polls while closing out; injectable so tests need not wait. */
   sleep?: (ms: number) => Promise<void>;
+  /** Live USD price of APT (the gas token), or null when unknown. Gas is only weighed in the controllers when known. */
+  aptUsd?: () => number | null;
 }
+
+/** Why a ladder was re-sent; counted so the cost of each reason can be seen. */
+export type ReplaceReason = "initial" | "threat" | "drift" | "fill" | "stale";
+const REPLACE_REASONS: ReplaceReason[] = ["initial", "threat", "drift", "fill", "stale"];
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
 
 export interface FlattenResult {
   /** True when no market has a position left that the venue would let us close. */
@@ -111,6 +128,20 @@ export class MarketMaker {
   private gasDay = "";
   private gasDayBase = 0;
   private gasPausedDay: string | null = null;
+  /** Gas already spent on this UTC day by earlier processes (restored from the state file). */
+  private gasCarryApt = 0;
+  private lastGasApt: number | null = null;
+  private startedAt: number | null = null;
+  /** >= 1 while gas runs ahead of its daily budget: thresholds and refresh intervals are stretched by it. */
+  private economy = 1;
+  private readonly replaceCounts: Record<ReplaceReason, number> = { initial: 0, threat: 0, drift: 0, fill: 0, stale: 0 };
+  private replaceTimes: number[] = [];
+  private takerReduce = 0;
+  private takerCross = 0;
+  private crossTimes: number[] = [];
+  private readonly lastReduceAt = new Map<string, number>();
+  /** Equity the equity-based sizes were last derived from. */
+  private sizingEquity: number | null = null;
   /** Time of the current step (injected by the caller so simulations can run faster than real time). */
   private clock = 0;
 
@@ -141,6 +172,7 @@ export class MarketMaker {
         spec,
         cfg: mc,
         live: null,
+        placed: null,
         lastReplaceAt: 0,
         nextInterval: cfg.engine.minReplaceIntervalMs,
         dirty: true,
@@ -151,6 +183,8 @@ export class MarketMaker {
         fuse: new VolatilityFuse(cfg.fuse),
         fuseStatus: { state: "ok" },
         warnedTooSmall: false,
+        urgentBps: cfg.engine.urgentRepriceBps,
+        sizeNow: null,
       });
     }
     if (opts.persist) this.restore();
@@ -169,10 +203,26 @@ export class MarketMaker {
       const st = this.states.get(f.market);
       if (!st) continue;
       st.dirty = true; // resting sizes changed; re-send the full ladder
+      if (f.isMaker) applyFillToLadder(st.live, f, st.spec);
       this.fillCount++;
       if (!f.isMaker) {
         this.takerFills++;
-        this.log("warn", "taker fill: paid the taker fee and lowered the maker share", { market: f.market, px: f.price, sz: f.size });
+        // Our own reduce-only order, or a resting order the market reached before it landed (it then executes as taker)?
+        const sinceReduce = now - (this.lastReduceAt.get(f.market) ?? -Infinity);
+        const kind = sinceReduce >= 0 && sinceReduce < 10_000 ? "reduce" : "cross";
+        if (kind === "reduce") this.takerReduce++;
+        else {
+          this.takerCross++;
+          this.crossTimes.push(now);
+        }
+        this.log("warn", "taker fill: paid the taker fee and lowered the maker share", {
+          market: f.market,
+          side: f.side,
+          px: f.price,
+          sz: f.size,
+          kind,
+          ...(kind === "cross" ? { msSinceReplace: st.lastReplaceAt ? now - st.lastReplaceAt : null } : {}),
+        });
       }
       this.points.onFill(f, this.lastMid.get(f.market) ?? f.price);
       this.log("info", "fill", { market: f.market, side: f.side, px: f.price, sz: f.size, maker: f.isMaker, fee: round(f.feeUsd, 4) });
@@ -184,7 +234,9 @@ export class MarketMaker {
     const acct = this.ex.getAccount();
     if (acct && this.startEquity === null) this.startEquity = acct.equityUsd;
 
+    if (this.startedAt === null) this.startedAt = now;
     const gas = this.ex.getGas?.() ?? null;
+    if (gas) this.accountGas(now, gas.gasApt);
     if (gas && gas.balanceApt !== null && gas.balanceApt < this.cfg.risk.minGasBalanceApt) {
       this.log("error", "HALT", { reason: "signer APT balance below reserve", balanceApt: gas.balanceApt, minGasBalanceApt: this.cfg.risk.minGasBalanceApt });
       await this.haltAll();
@@ -223,19 +275,76 @@ export class MarketMaker {
     return Math.abs(posUsd) <= maxPos * this.cfg.risk.emergencyPositionMult * 2;
   }
 
-  /** Pull quotes for the rest of the UTC day once the gas budget is spent. */
+  /** Gas spent since the last step goes into the cost average that the spread controller reads. */
+  private accountGas(now: number, gasApt: number): void {
+    if (this.lastGasApt !== null && gasApt > this.lastGasApt) {
+      const apt = this.aptUsdNow();
+      if (apt !== null) this.points.onGasCost((gasApt - this.lastGasApt) * apt, now);
+    }
+    this.lastGasApt = gasApt;
+  }
+
+  /** USD per APT from the live feed, else the configured fallback, else null (gas is then not priced). */
+  private aptUsdNow(): number | null {
+    const v = this.opts.aptUsd?.() ?? this.cfg.gas.aptUsdFallback;
+    return v !== null && v > 0 ? v : null;
+  }
+
+  /** Dollar cost of one transaction: observed average once there are enough of them, the assumed figure before. */
+  private gasUsdPerTx(): number | null {
+    const apt = this.aptUsdNow();
+    if (apt === null) return null;
+    const g = this.ex.getGas?.() ?? null;
+    const perTx = g && g.txCount >= 5 && g.gasApt > 0 ? g.gasApt / g.txCount : this.cfg.gas.assumedAptPerTx;
+    return perTx * apt;
+  }
+
+  /**
+   * Drift (bps) at which a market re-quotes at once. A stale quote costs about (drift - half spread) x its
+   * size x the chance it is hit; fixing it costs one transaction. They are equal at
+   * half spread + gas(bps of the top level) / staleFillProb, so cheap gas or big levels re-quote sooner and tiny
+   * levels wait. Without a gas price (or with `staleFillProb` 0) it is the fixed `urgentRepriceBps`. `economy`
+   * stretches the result while gas is running over its daily budget.
+   */
+  private urgentThresholdBps(qp: QuoteParams, target: Ladder): number {
+    const e = this.cfg.engine;
+    const fixed = e.urgentRepriceBps * this.economy;
+    const gasUsd = this.gasUsdPerTx();
+    const top = topLevelUsd(target);
+    if (e.staleFillProb <= 0 || gasUsd === null || !(top > 0)) return fixed;
+    const econ = halfSpreadBps(qp) + ((gasUsd / top) * 1e4) / e.staleFillProb;
+    return Math.min(e.urgentMaxBps, Math.max(e.urgentMinBps, econ)) * this.economy;
+  }
+
+  /** Extra ticks kept away from the opposite touch: the configured guard plus one per few recent taker crossings. */
+  private guardTicks(now: number): number {
+    const c = this.cfg.competition;
+    this.crossTimes = this.crossTimes.filter((t) => now - t < HOUR_MS);
+    const extra = c.crossesPerTick > 0 ? Math.min(c.maxGuardTicks, Math.floor(this.crossTimes.length / c.crossesPerTick)) : 0;
+    return c.touchGuardTicks + extra;
+  }
+
+  /** Gas spent today across this and earlier processes, in APT. */
+  private gasSpentToday(gasApt: number): number {
+    return this.gasCarryApt + (gasApt - this.gasDayBase);
+  }
+
+  /** Pull quotes for the rest of the UTC day once the gas budget is spent; before that, slow down if spending runs ahead. */
   private async gasBudgetExceeded(now: number, gasApt: number): Promise<boolean> {
     const day = utcDay(now);
     if (day !== this.gasDay) {
+      if (this.gasDay !== "") this.gasCarryApt = 0;
       this.gasDay = day;
       this.gasDayBase = gasApt;
       this.gasPausedDay = null;
     }
     if (this.gasPausedDay === day) return true;
-    const spent = gasApt - this.gasDayBase;
-    if (spent < this.cfg.risk.maxGasAptPerDay) return false;
+    const spent = this.gasSpentToday(gasApt);
+    const budget = this.cfg.risk.maxGasAptPerDay;
+    this.economy = Math.min(this.cfg.engine.economyMaxMult, Math.max(1, spent / (budget * Math.max((now % DAY_MS) / DAY_MS, 0.05))));
+    if (spent < budget) return false;
     this.gasPausedDay = day;
-    this.log("error", "gas budget for the day spent; pulling quotes until tomorrow (UTC)", { spentApt: round(spent, 6), maxGasAptPerDay: this.cfg.risk.maxGasAptPerDay });
+    this.log("error", "gas budget for the day spent; pulling quotes until tomorrow (UTC)", { spentApt: round(spent, 6), maxGasAptPerDay: budget });
     await this.cancelAll();
     return true;
   }
@@ -297,7 +406,7 @@ export class MarketMaker {
       }
       if (st.live) {
         await this.ex.cancelAll(name);
-        st.live = null;
+        st.live = st.placed = null;
       }
       st.dirty = true;
       return;
@@ -305,7 +414,9 @@ export class MarketMaker {
     const widen = fz.state === "recovering" ? fz.widen : 1;
 
     const scale = this.ramp.mult;
-    const maxPos = st.cfg.maxPositionUsd * scale;
+    const size = this.sizeOf(st, equity, scale);
+    st.sizeNow = size;
+    const maxPos = size.maxPos;
     const position = this.ex.getPosition(name);
     const posUsd = fair !== null ? position * fair : 0;
     const risk = assess(
@@ -337,7 +448,7 @@ export class MarketMaker {
       st.lastPause = risk.reason;
       if (st.live) {
         await this.ex.cancelAll(name);
-        st.live = null;
+        st.live = st.placed = null;
         st.dirty = true;
       }
       return;
@@ -350,6 +461,7 @@ export class MarketMaker {
         const slip = 10 / 1e4;
         const limitPrice = risk.side === "buy" ? fair * (1 + slip) : fair * (1 - slip);
         this.log("warn", "reduce", { market: name, side: risk.side, size, reason: risk.reason });
+        this.lastReduceAt.set(name, now);
         await this.ex.reduce({ market: name, side: risk.side, size, limitPrice });
         st.dirty = true;
       }
@@ -358,36 +470,37 @@ export class MarketMaker {
     // (When holdTakerReduce is true the one-sided quotes below keep working the position down as a maker.)
     if (fair === null) return;
 
-    if (!st.warnedTooSmall && st.cfg.levelSizeUsd * scale / fair < st.spec.minSize) {
+    if (!st.warnedTooSmall && size.level / fair < st.spec.minSize) {
       st.warnedTooSmall = true;
-      this.log("warn", "ramp stage too small: level size is below the market minimum, no quotes until the stage grows", { market: name, sizeMult: scale });
+      this.log("warn", "level size is below the market minimum, no quotes until the size grows (ramp stage or equity)", { market: name, sizeMult: scale, levelUsd: round(size.level, 2), capUsd: round(size.maxPos, 2) });
     }
 
-    const target = buildLadder({
-      spec: st.spec,
-      fair,
-      position,
-      book,
-      params: this.quoteParams(st, mult * widen, scale),
-    });
+    const qp = this.quoteParams(st, mult * widen, size);
+    qp.guardTicks = this.guardTicks(now);
+    const target = buildLadder({ spec: st.spec, fair, position, book, params: qp });
 
     const empty = target.bids.length + target.asks.length === 0;
-    const threatened = isLadderThreatened(st.live, rawBook, this.cfg.engine.threatBps);
-    const urgent = topDriftBps(st.live, target) >= this.cfg.engine.urgentRepriceBps;
-    const due = now - st.lastReplaceAt >= st.nextInterval;
-    const stale = needsReplace(st.live, target, this.cfg.engine);
+    const threatened = isLadderThreatened(st.placed, rawBook, this.cfg.engine.threatBps);
+    st.urgentBps = this.urgentThresholdBps(qp, target);
+    const urgent = topDriftBps(st.placed, target) >= st.urgentBps;
+    const due = now - st.lastReplaceAt >= st.nextInterval * this.economy;
+    const stale = needsReplace(st.placed, target, this.cfg.engine);
 
     if (!(st.dirty || stale || threatened || urgent)) return;
     if (!due && !threatened && !urgent && st.live) return;
     // Hard cap on transaction rate: every replace costs gas.
     if (st.live && now - st.lastReplaceAt < this.cfg.engine.hardMinReplaceIntervalMs) return;
 
+    const reason: ReplaceReason = !st.live ? "initial" : threatened ? "threat" : urgent ? "drift" : st.dirty ? "fill" : "stale";
     const ok = empty ? await this.ex.cancelAll(name) : await this.ex.replaceLadder(name, target);
     st.lastReplaceAt = now;
     const j = this.cfg.engine.jitterPct;
     st.nextInterval = this.cfg.engine.minReplaceIntervalMs * (1 + (this.rng() * 2 - 1) * j);
+    this.replaceCounts[reason]++;
+    this.replaceTimes.push(now);
     if (ok) {
       st.live = empty ? null : cloneLadder(target);
+      st.placed = empty ? null : cloneLadder(target);
       st.dirty = false;
       st.failures = 0;
     } else {
@@ -410,17 +523,33 @@ export class MarketMaker {
     return ratio === null || ratio >= r.minMakerRatio ? r.bps : 0;
   }
 
-  private quoteParams(st: MarketState, mult: number, scale: number): QuoteParams {
+  /**
+   * Position cap and first-level size for a market, in USD. Fixed from the config unless `sizing.leverage` is set,
+   * in which case they follow equity (the configured numbers act as ceilings). `scale` is the ramp stage.
+   */
+  private sizeOf(st: MarketState, equity: number | null, scale: number): { maxPos: number; level: number } {
+    const z = this.cfg.sizing;
+    let cap = st.cfg.maxPositionUsd;
+    let level = st.cfg.levelSizeUsd;
+    if (z.leverage > 0 && equity !== null && equity > 0) {
+      if (this.sizingEquity === null || Math.abs(equity - this.sizingEquity) / this.sizingEquity > z.rebalanceTol) this.sizingEquity = equity;
+      cap = Math.min(cap, (this.sizingEquity * z.leverage) / this.states.size);
+      level = Math.min(level, cap * z.levelFraction);
+    }
+    return { maxPos: cap * scale, level: level * scale };
+  }
+
+  private quoteParams(st: MarketState, mult: number, size: { maxPos: number; level: number }): QuoteParams {
     const c = st.cfg;
     const fee = this.ex.getFees?.();
     return {
       levels: c.levels,
       baseHalfSpreadBps: c.baseHalfSpreadBps,
       levelStepBps: c.levelStepBps,
-      levelSizeUsd: c.levelSizeUsd * scale,
+      levelSizeUsd: size.level,
       sizeGrowth: c.sizeGrowth,
       inventorySkewBps: c.inventorySkewBps,
-      maxPositionUsd: c.maxPositionUsd * scale,
+      maxPositionUsd: size.maxPos,
       minHalfSpreadBps: c.minHalfSpreadBps,
       spreadMult: mult,
       volBps: realizedVolBps(st.samples),
@@ -454,6 +583,11 @@ export class MarketMaker {
     }
   }
 
+  /** What the live file holds: the status numbers plus a view of every market. */
+  snapshot(now: number): Record<string, unknown> {
+    return { ...this.statusFields(now), markets: this.marketViews() };
+  }
+
   /** The numbers behind every `status` log line (and the live snapshot). */
   private statusFields(now: number): Record<string, unknown> {
     const s = this.points.stats(now);
@@ -480,6 +614,16 @@ export class MarketMaker {
       sizeMult: this.ramp.mult,
       phase: this.phase,
       takerFills: this.takerFills,
+      takerReduce: this.takerReduce,
+      takerCross: this.takerCross,
+      guardTicks: this.guardTicks(now),
+      replaces: { ...this.replaceCounts },
+      replacesLastHour: this.replacesLastHour(now),
+      economy: round(this.economy, 2),
+      aptUsd: this.aptUsdNow(),
+      gasUsd: round(s.dayGasUsd, 4),
+      gasBps: s.dayVolumeUsd > 0 ? round((s.dayGasUsd / s.dayVolumeUsd) * 1e4, 3) : null,
+      gasRunwayDays: this.gasRunwayDays(now, gasNow),
       cycle: s.cycleKey,
       cycleMakerRatio: s.cycleMakerRatio === null ? null : round(s.cycleMakerRatio, 3),
       rebateEligible: s.cycleMakerRatio === null || s.cycleMakerRatio >= this.cfg.rebate.minMakerRatio,
@@ -493,6 +637,19 @@ export class MarketMaker {
       paused,
       ...(gasNow ? { txCount: gasNow.txCount, gasApt: round(gasNow.gasApt, 6), signerAptBalance: gasNow.balanceApt === null ? null : round(gasNow.balanceApt, 4) } : {}),
     };
+  }
+
+  private replacesLastHour(now: number): number {
+    this.replaceTimes = this.replaceTimes.filter((t) => now - t < HOUR_MS);
+    return this.replaceTimes.length;
+  }
+
+  /** Days the signer's APT balance lasts at this process's average burn; null until there is half an hour of data. */
+  private gasRunwayDays(now: number, gas: { gasApt: number; balanceApt: number | null } | null): number | null {
+    if (!gas || gas.balanceApt === null || this.startedAt === null) return null;
+    const days = (now - this.startedAt) / DAY_MS;
+    if (days < 1800_000 / DAY_MS || !(gas.gasApt > 0)) return null;
+    return round(gas.balanceApt / (gas.gasApt / days), 1);
   }
 
   /** Per-market view for the dashboard: top of book, position, resting quotes, fuse. */
@@ -519,6 +676,9 @@ export class MarketMaker {
         fuseReason: f.state === "tripped" || f.state === "halt" ? f.reason : null,
         quotes: st.live ? { bids: st.live.bids.map((q) => [q.price, q.size]), asks: st.live.asks.map((q) => [q.price, q.size]) } : null,
         lastReplaceAt: st.lastReplaceAt || null,
+        urgentBps: round(st.urgentBps, 2),
+        capUsd: st.sizeNow ? round(st.sizeNow.maxPos, 2) : null,
+        levelUsd: st.sizeNow ? round(st.sizeNow.level, 2) : null,
       };
     }
     return out;
@@ -530,7 +690,7 @@ export class MarketMaker {
     try {
       mkdirSync(dirname(file), { recursive: true });
       const tmp = `${file}.tmp`;
-      writeFileSync(tmp, JSON.stringify({ t: new Date().toISOString(), now, pid: process.pid, endsAt: this.opts.endsAt ?? null, ...this.statusFields(now), markets: this.marketViews() }));
+      writeFileSync(tmp, JSON.stringify({ t: new Date().toISOString(), now, pid: process.pid, endsAt: this.opts.endsAt ?? null, ...this.snapshot(now) }));
       renameSync(tmp, file);
     } catch (err) {
       if (!this.liveWarned) {
@@ -595,6 +755,8 @@ export class MarketMaker {
           cycleKey: s.cycleKey,
           cycleMakerUsd: s.cycleMakerVolumeUsd,
           cycleTakerUsd: s.cycleTakerVolumeUsd,
+          gasDay: this.gasDay,
+          gasSpentApt: this.lastGasApt === null || this.gasDay === "" ? this.gasCarryApt : this.gasSpentToday(this.lastGasApt),
         }),
       );
     } catch (e) {
@@ -606,6 +768,8 @@ export class MarketMaker {
     try {
       const raw = JSON.parse(readFileSync(this.cfg.engine.stateFile, "utf8"));
       if (raw.dayKey === new Date().toISOString().slice(0, 10)) this.points.restore(raw);
+      // Gas spent earlier today by a process that has since restarted still counts against today's budget.
+      if (raw.gasDay === new Date().toISOString().slice(0, 10) && Number.isFinite(raw.gasSpentApt)) this.gasCarryApt = Math.max(0, Number(raw.gasSpentApt));
       // The ramp stage is earned over days, so it survives day changes.
       if (typeof raw.rampStage === "number") this.ramp.restoreStage(raw.rampStage);
       if (typeof raw.cycleKey === "string") this.points.restoreCycle({ cycleKey: raw.cycleKey, makerUsd: Number(raw.cycleMakerUsd) || 0, takerUsd: Number(raw.cycleTakerUsd) || 0 }, Date.now());
@@ -691,12 +855,27 @@ export class MarketMaker {
     for (const st of this.states.values()) {
       try {
         await this.ex.cancelAll(st.spec.name);
-        st.live = null;
+        st.live = st.placed = null;
       } catch (e) {
         this.log("error", "cancelAll failed", { market: st.spec.name, error: String(e) });
       }
     }
   }
+}
+
+/**
+ * Take a fill off the ladder we believe is resting, so that it keeps matching the venue: a filled level must not go on
+ * being subtracted from the book as "our" size (that made other people's orders at the same price vanish from our view
+ * of the touch) nor count as the top of our ladder when measuring how stale it is.
+ */
+export function applyFillToLadder(live: Ladder | null, f: { side: "buy" | "sell"; price: number; size: number }, spec: MarketSpec): void {
+  if (!live) return;
+  const list = f.side === "buy" ? live.bids : live.asks;
+  const i = list.findIndex((q) => Math.abs(q.price - f.price) < spec.tickSize / 2);
+  if (i < 0) return;
+  const q = list[i]!;
+  q.size = Number((q.size - f.size).toFixed(Math.max(spec.szDecimals, 8)));
+  if (q.size < spec.lotSize / 2) list.splice(i, 1);
 }
 
 function cloneLadder(l: Ladder): Ladder {

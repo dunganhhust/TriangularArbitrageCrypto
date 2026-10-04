@@ -22,6 +22,8 @@ export interface QuoteParams {
   volK: number;
   /** Optional touch competition; see {@link buildLadder}. */
   competition?: CompetitionParams;
+  /** Ticks to keep between our quotes and the opposite touch, on top of the one tick it takes not to cross. */
+  guardTicks?: number;
 }
 
 export interface CompetitionParams {
@@ -46,6 +48,19 @@ export interface QuoteInput {
 }
 
 const EPS = 1e-9;
+
+/** Half spread of the first level in bps, before inventory skew: the floor applies after the multiplier. */
+export function halfSpreadBps(p: Pick<QuoteParams, "minHalfSpreadBps" | "baseHalfSpreadBps" | "volK" | "volBps" | "spreadMult">): number {
+  return Math.max(p.minHalfSpreadBps, (p.baseHalfSpreadBps + p.volK * p.volBps) * p.spreadMult);
+}
+
+/** Mean USD size of the best bid and best ask of a ladder (one side if the other is empty); 0 for an empty ladder. */
+export function topLevelUsd(l: Ladder): number {
+  const b = l.bids[0];
+  const a = l.asks[0];
+  const xs = [b ? b.price * b.size : null, a ? a.price * a.size : null].filter((x): x is number => x !== null);
+  return xs.length === 0 ? 0 : xs.reduce((x, y) => x + y, 0) / xs.length;
+}
 
 export function roundDownToStep(x: number, step: number): number {
   return Math.floor(x / step + EPS) * step;
@@ -101,12 +116,13 @@ export function buildLadder(inp: QuoteInput): Ladder {
   const reservation = fair * (1 - (invRatio * p.inventorySkewBps) / 1e4);
 
   // The floor applies after the multiplier so spreadMult < 1 can never undercut minHalfSpreadBps.
-  const half0 = Math.max(p.minHalfSpreadBps, (p.baseHalfSpreadBps + p.volK * p.volBps) * p.spreadMult);
+  const half0 = halfSpreadBps(p);
 
   const bestBid = book?.bids[0]?.price;
   const bestAsk = book?.asks[0]?.price;
-  const maxBid = bestAsk !== undefined ? bestAsk - spec.tickSize : Infinity;
-  const minAsk = bestBid !== undefined ? bestBid + spec.tickSize : 0;
+  const gap = (1 + Math.max(0, p.guardTicks ?? 0)) * spec.tickSize;
+  const maxBid = bestAsk !== undefined ? bestAsk - gap : Infinity;
+  const minAsk = bestBid !== undefined ? bestBid + gap : 0;
 
   // Remaining exposure capacity per side (USD, never negative).
   let buyCap = Math.max(0, p.maxPositionUsd - posUsd);
