@@ -1,4 +1,4 @@
-import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Config, MarketConfig } from "./config.js";
 import type { Exchange } from "./exchange/exchange.js";
@@ -21,26 +21,57 @@ import type { QuoteParams } from "./strategy/quoter.js";
 import { assess } from "./strategy/risk.js";
 import type { RiskConfig } from "./strategy/risk.js";
 import type { Ladder, MarketSpec } from "./types.js";
+import type { DaySummary } from "./strategy/points.js";
 
 export type Logger = (level: "info" | "warn" | "error", msg: string, extra?: Record<string, unknown>) => void;
 
 let runLogFile: string | null = null;
+let runLogMax = 0;
+let runLogBytes = 0;
+/** The run's start line is carried over into a fresh file after a rotation, so the dashboard still sees a run. */
+let runLogStart: string | null = null;
 
-/** Also append every log line to this file (the dashboard reads it). null/empty = stdout only. */
-export function setRunLogFile(path: string | null): void {
+/**
+ * Also append every log line to this file (the dashboard reads it). null/empty = stdout only. With `maxBytes` the
+ * file is moved to `<path>.1` (replacing the previous one) once it grows past that size.
+ */
+export function setRunLogFile(path: string | null, maxBytes = 0): void {
   runLogFile = path || null;
-  if (runLogFile) mkdirSync(dirname(runLogFile), { recursive: true });
+  runLogMax = maxBytes;
+  runLogStart = null;
+  runLogBytes = 0;
+  if (!runLogFile) return;
+  mkdirSync(dirname(runLogFile), { recursive: true });
+  try {
+    runLogBytes = statSync(runLogFile).size;
+  } catch {
+    /* new file */
+  }
+}
+
+function appendRunLog(line: string): void {
+  if (!runLogFile) return;
+  try {
+    if (runLogMax > 0 && runLogBytes + line.length > runLogMax) {
+      renameSync(runLogFile, `${runLogFile}.1`);
+      runLogBytes = 0;
+      if (runLogStart) {
+        appendFileSync(runLogFile, runLogStart + "\n");
+        runLogBytes = runLogStart.length + 1;
+      }
+    }
+    appendFileSync(runLogFile, line + "\n");
+    runLogBytes += line.length + 1;
+  } catch {
+    // Logging must never be able to stop the bot.
+  }
 }
 
 export const jsonLogger: Logger = (level, msg, extra) => {
   const line = JSON.stringify({ t: new Date().toISOString(), level, msg, ...extra });
   console.log(line);
-  if (!runLogFile) return;
-  try {
-    appendFileSync(runLogFile, line + "\n");
-  } catch {
-    // Logging must never be able to stop the bot.
-  }
+  if (msg === "market maker started") runLogStart = line;
+  appendRunLog(line);
 };
 
 interface MarketState {
@@ -117,7 +148,7 @@ export class MarketMaker {
   private lastStatus = 0;
   private lastLive = 0;
   private liveWarned = false;
-  private phase: "running" | "flattening" | "done" = "running";
+  private phase: "running" | "paused" | "flattening" | "done" = "running";
   private lastPointsPoll = 0;
   private lastSave = 0;
   private halted = false;
@@ -140,6 +171,16 @@ export class MarketMaker {
   private takerCross = 0;
   private crossTimes: number[] = [];
   private readonly lastReduceAt = new Map<string, number>();
+  /** Set while positions or the account cannot be read: the bot is blind and keeps its quotes off. */
+  private blindSince: number | null = null;
+  /** Since when no market has had usable data (blind, or every book stale/empty); drives the watchdog. */
+  private unhealthySince: number | null = null;
+  /** Equity at the first look of the current UTC day: the baseline of the daily loss limit. */
+  private dayStart: { key: string; equity: number } | null = null;
+  private dailyPausedDay: string | null = null;
+  private lastPausedClose = 0;
+  private dayFills = 0;
+  private lastRunwayWarn = 0;
   /** Equity the equity-based sizes were last derived from. */
   private sizingEquity: number | null = null;
   /** Time of the current step (injected by the caller so simulations can run faster than real time). */
@@ -154,6 +195,7 @@ export class MarketMaker {
     this.log = opts.log ?? jsonLogger;
     this.rng = opts.rng ?? Math.random;
     this.points = new PointsController(cfg.points);
+    this.points.onDayEnd = (d) => this.dayEnded(d);
     this.ramp = new RampController(cfg.ramp);
     this.risk = {
       staleBookMs: cfg.risk.staleBookMs,
@@ -225,6 +267,7 @@ export class MarketMaker {
         });
       }
       this.points.onFill(f, this.lastMid.get(f.market) ?? f.price);
+      this.dayFills++; // after onFill: a fill that opens a new UTC day must not be counted in the day it ends
       this.log("info", "fill", { market: f.market, side: f.side, px: f.price, sz: f.size, maker: f.isMaker, fee: round(f.feeUsd, 4) });
     }
     this.points.tick(now, (m) => this.lastMid.get(m));
@@ -233,6 +276,28 @@ export class MarketMaker {
 
     const acct = this.ex.getAccount();
     if (acct && this.startEquity === null) this.startEquity = acct.equityUsd;
+    if (acct) {
+      this.rollEquityDay(now, acct.equityUsd);
+      const floor = this.cfg.risk.minEquityUsd;
+      if (floor > 0 && acct.equityUsd < floor) {
+        this.log("error", "HALT", { reason: `equity ${round(acct.equityUsd, 2)} USD below the floor`, minEquityUsd: floor });
+        await this.haltAll();
+        return;
+      }
+    }
+    if (await this.dailyLossGate(now, acct?.equityUsd ?? null)) {
+      this.updateHealth(now);
+      await this.housekeeping(now);
+      return;
+    }
+    const blind = this.blindReason();
+    if (blind) {
+      await this.goBlind(now, blind);
+      this.updateHealth(now);
+      await this.housekeeping(now);
+      return;
+    }
+    this.blindSince = null;
 
     if (this.startedAt === null) this.startedAt = now;
     const gas = this.ex.getGas?.() ?? null;
@@ -263,7 +328,138 @@ export class MarketMaker {
       if (this.halted) return;
     }
 
+    this.updateHealth(now);
     await this.housekeeping(now);
+  }
+
+  /** Cancel quotes a previous process left resting (it crashed or was killed). Returns the markets that had some. */
+  async cleanupLeftovers(): Promise<string[]> {
+    let resting: string[];
+    try {
+      resting = (await this.ex.listResting?.()) ?? [];
+    } catch (e) {
+      this.log("warn", "could not list leftover quotes; cancelling on every market to be safe", { error: String(e) });
+      resting = [...this.states.keys()];
+    }
+    const mine = resting.filter((n) => this.states.has(n));
+    for (const name of mine) {
+      try {
+        await this.ex.cancelAll(name);
+      } catch (e) {
+        this.log("error", "cleanup: cancel failed", { market: name, error: String(e) });
+      }
+    }
+    if (mine.length > 0) this.log("warn", "startup: cancelled quotes left behind by an earlier process", { markets: mine });
+    return mine;
+  }
+
+  /** True once the data has been unusable for `engine.watchdogMs`: the runner then ends the process for a clean restart. */
+  restartRequested(now: number): boolean {
+    const w = this.cfg.engine.watchdogMs;
+    return w > 0 && this.unhealthySince !== null && now - this.unhealthySince >= w;
+  }
+
+  /** Why the bot cannot trust its picture of the account right now, or null. */
+  private blindReason(): string | null {
+    const age = this.ex.dataAge?.();
+    if (!age) return null;
+    const max = this.cfg.risk.maxDataStaleMs;
+    if (age.positionsMs !== null && age.positionsMs > max) return `positions not refreshed for ${Math.round(age.positionsMs / 1000)}s`;
+    if (age.accountMs !== null && age.accountMs > max) return `account not refreshed for ${Math.round(age.accountMs / 1000)}s`;
+    return null;
+  }
+
+  /** Positions and equity cannot be read: quoting on a stale picture risks piling up inventory unseen, so pull the quotes. */
+  private async goBlind(now: number, why: string): Promise<void> {
+    if (this.blindSince === null) {
+      this.blindSince = now;
+      this.log("error", "blind: pulling quotes until positions and account can be read again", { reason: why });
+      await this.cancelAll();
+      for (const st of this.states.values()) st.dirty = true;
+    }
+  }
+
+  private updateHealth(now: number): void {
+    const dead = this.blindSince !== null || [...this.states.values()].every((st) => st.lastPause === "stale book" || st.lastPause === "empty book");
+    if (!dead) this.unhealthySince = null;
+    else if (this.unhealthySince === null) this.unhealthySince = now;
+  }
+
+  private rollEquityDay(now: number, equity: number): void {
+    const key = utcDay(now);
+    if (this.dayStart?.key !== key) this.dayStart = { key, equity };
+  }
+
+  /**
+   * Daily loss limit. Once the day's loss reaches `risk.maxDailyLossUsd` the bot closes every position and stays flat
+   * until the next UTC day, then trades again by itself. Returns true while it is flat for the day.
+   */
+  private async dailyLossGate(now: number, equity: number | null): Promise<boolean> {
+    const limit = this.cfg.risk.maxDailyLossUsd;
+    if (limit <= 0) return false;
+    const day = utcDay(now);
+    if (this.dailyPausedDay === day) {
+      if (now - this.lastPausedClose >= 30_000 && this.hasOpenPositions()) {
+        this.lastPausedClose = now;
+        await this.closeOut(1);
+      }
+      return true;
+    }
+    if (this.dailyPausedDay !== null) {
+      this.dailyPausedDay = null;
+      this.phase = "running";
+      this.log("info", "new UTC day: quoting again after the daily loss pause");
+      for (const st of this.states.values()) st.dirty = true;
+    }
+    if (equity === null || this.dayStart === null || this.dayStart.key !== day) return false;
+    const lost = this.dayStart.equity - equity;
+    if (lost < limit) return false;
+    this.dailyPausedDay = day;
+    this.phase = "paused";
+    this.log("error", "daily loss limit reached: closing positions and staying flat until tomorrow (UTC)", { lostUsd: round(lost, 4), maxDailyLossUsd: limit, dayStartEquity: round(this.dayStart.equity, 2), equity: round(equity, 2) });
+    await this.cancelAll();
+    this.lastPausedClose = now;
+    await this.closeOut();
+    return true;
+  }
+
+  private hasOpenPositions(): boolean {
+    for (const [name, st] of this.states) {
+      if (roundDownToStep(Math.abs(this.ex.getPosition(name)), st.spec.lotSize) >= st.spec.minSize) return true;
+    }
+    return false;
+  }
+
+  /** Called by the points controller when a UTC day ends, with that day's totals. */
+  private dayEnded(d: DaySummary): void {
+    const eq = this.ex.getAccount()?.equityUsd ?? null;
+    const row = {
+      day: d.day,
+      volumeUsd: round(d.volumeUsd, 2),
+      makerVolumeUsd: round(d.makerVolumeUsd, 2),
+      takerVolumeUsd: round(d.takerVolumeUsd, 2),
+      fills: this.dayFills,
+      feesUsd: round(d.feesUsd, 4),
+      gasUsd: round(d.gasUsd, 4),
+      equityStart: this.dayStart && this.dayStart.key === d.day ? round(this.dayStart.equity, 4) : null,
+      equityEnd: eq === null ? null : round(eq, 4),
+      replaces: Object.values(this.replaceCounts).reduce((a, b) => a + b, 0),
+      takerCross: this.takerCross,
+      takerReduce: this.takerReduce,
+      fuseTrips: this.tripCount,
+      spreadMult: round(this.points.stats(this.clock).spreadMult, 3),
+    };
+    this.dayFills = 0;
+    this.log("info", "daily summary", row);
+    const file = this.cfg.engine.dailyLogFile;
+    if (!file || !this.opts.persist) return;
+    try {
+      mkdirSync(dirname(file), { recursive: true });
+      if (!existsSync(file)) writeFileSync(file, Object.keys(row).join(",") + "\n");
+      appendFileSync(file, Object.values(row).map((v) => (v === null ? "" : String(v))).join(",") + "\n");
+    } catch (e) {
+      this.log("warn", "daily summary write failed", { error: String(e) });
+    }
   }
 
   /** True when a taker reduce should wait: it would cost the rebate and the position is not yet extreme. */
@@ -568,6 +764,11 @@ export class MarketMaker {
     if (now - this.lastStatus >= e.statusEveryMs) {
       this.lastStatus = now;
       this.log("info", "status", this.statusFields(now));
+      const runway = this.gasRunwayDays(now, this.ex.getGas?.() ?? null);
+      if (runway !== null && runway < 3 && now - this.lastRunwayWarn >= HOUR_MS) {
+        this.lastRunwayWarn = now;
+        this.log(runway < 1 ? "error" : "warn", "APT for gas is running low: top up the signer account", { daysLeft: runway, balanceApt: this.ex.getGas?.()?.balanceApt ?? null });
+      }
     }
     if (this.opts.persist && e.liveFile && now - this.lastLive >= e.liveEveryMs) {
       this.lastLive = now;
@@ -755,6 +956,9 @@ export class MarketMaker {
           cycleKey: s.cycleKey,
           cycleMakerUsd: s.cycleMakerVolumeUsd,
           cycleTakerUsd: s.cycleTakerVolumeUsd,
+          dayStartKey: this.dayStart?.key ?? null,
+          dayStartEquity: this.dayStart?.equity ?? null,
+          dailyPausedDay: this.dailyPausedDay,
           gasDay: this.gasDay,
           gasSpentApt: this.lastGasApt === null || this.gasDay === "" ? this.gasCarryApt : this.gasSpentToday(this.lastGasApt),
         }),
@@ -768,6 +972,13 @@ export class MarketMaker {
     try {
       const raw = JSON.parse(readFileSync(this.cfg.engine.stateFile, "utf8"));
       if (raw.dayKey === new Date().toISOString().slice(0, 10)) this.points.restore(raw);
+      // The daily loss baseline and a pause already in force survive a restart on the same UTC day.
+      const today = new Date().toISOString().slice(0, 10);
+      if (raw.dayStartKey === today && Number.isFinite(raw.dayStartEquity)) this.dayStart = { key: today, equity: Number(raw.dayStartEquity) };
+      if (raw.dailyPausedDay === today) {
+        this.dailyPausedDay = today;
+        this.phase = "paused";
+      }
       // Gas spent earlier today by a process that has since restarted still counts against today's budget.
       if (raw.gasDay === new Date().toISOString().slice(0, 10) && Number.isFinite(raw.gasSpentApt)) this.gasCarryApt = Math.max(0, Number(raw.gasSpentApt));
       // The ramp stage is earned over days, so it survives day changes.
@@ -786,8 +997,16 @@ export class MarketMaker {
   async flattenAll(o: { attempts?: number } = {}): Promise<FlattenResult> {
     this.halted = true; // step() stops placing quotes
     this.phase = "flattening";
-    const sleep = this.opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     await this.cancelAll();
+    const res = await this.closeOut(o.attempts);
+    this.phase = "done";
+    if (this.opts.persist && this.cfg.engine.liveFile) this.writeLive(Date.now());
+    return res;
+  }
+
+  /** Close every open position with reduce-only IOC orders (the quotes must already be off). Does not stop the engine. */
+  private async closeOut(attemptsWanted?: number): Promise<FlattenResult> {
+    const sleep = this.opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     let orders = 0;
 
     const open = () => {
@@ -800,7 +1019,7 @@ export class MarketMaker {
       return out;
     };
 
-    const attempts = Math.min(o.attempts ?? FLATTEN_SLIPPAGE_BPS.length, FLATTEN_SLIPPAGE_BPS.length);
+    const attempts = Math.min(attemptsWanted ?? FLATTEN_SLIPPAGE_BPS.length, FLATTEN_SLIPPAGE_BPS.length);
     for (let attempt = 0; attempt < attempts; attempt++) {
       const todo = open();
       if (todo.length === 0) break;
@@ -817,6 +1036,7 @@ export class MarketMaker {
         const side = pos > 0 ? "sell" : "buy";
         const limitPrice = side === "sell" ? ref * (1 - slip) : ref * (1 + slip);
         this.log("info", "flatten: order", { market: name, side, size: round(size, 8), ref, limitPrice: round(limitPrice, 4) });
+        this.lastReduceAt.set(name, this.clock);
         try {
           if (await this.ex.reduce({ market: name, side, size, limitPrice })) orders++;
         } catch (e) {
@@ -839,8 +1059,6 @@ export class MarketMaker {
       else dust[name] = round(pos, 8);
     }
     const closed = Object.keys(residual).length === 0;
-    this.phase = "done";
-    if (this.opts.persist && this.cfg.engine.liveFile) this.writeLive(Date.now());
     this.log(closed ? "info" : "error", closed ? "flatten: done" : "flatten: INCOMPLETE, positions remain", { residual, dust, orders });
     return { closed, residual, dust, orders };
   }

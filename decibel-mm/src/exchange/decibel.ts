@@ -224,6 +224,8 @@ export class DecibelExchange implements Exchange {
   private txCount = 0;
   private gasOctas = 0;
   private balanceApt: number | null = null;
+  private positionsOkAt: number | null = null;
+  private accountOkAt: number | null = null;
   private makerRate = 0.00011;
   private takerRate = 0.00034;
   private readonly log: (msg: string, extra?: Record<string, unknown>) => void;
@@ -383,6 +385,7 @@ export class DecibelExchange implements Exchange {
   private async refreshAccount(): Promise<void> {
     const ov = await this.read.accountOverview.getByAddr({ subAddr: this.o.env.subaccount });
     this.account = { equityUsd: ov.perp_equity_balance, ts: Date.now() };
+    this.accountOkAt = Date.now();
   }
 
   /** The signing (hot) account pays gas in APT unless a gas station is configured. */
@@ -414,6 +417,23 @@ export class DecibelExchange implements Exchange {
       next.set(name, r.size / this.szScale(name));
     }
     for (const name of this.specs.keys()) this.positions.set(name, next.get(name) ?? 0);
+    this.positionsOkAt = Date.now();
+  }
+
+  dataAge(): { positionsMs: number | null; accountMs: number | null } {
+    const age = (t: number | null): number | null => (t === null ? null : Date.now() - t);
+    return { positionsMs: age(this.positionsOkAt), accountMs: age(this.accountOkAt) };
+  }
+
+  /** Markets for which the indexer still lists a live bulk order (bids or asks). */
+  async listResting(): Promise<string[]> {
+    const rows = await this.read.userBulkOrders.getByAddr({ subAddr: this.o.env.subaccount });
+    const out = new Set<string>();
+    for (const r of rows) {
+      const name = this.byAddr.get(r.market.toLowerCase());
+      if (name && !r.cancellation_reason && r.bid_prices.length + r.ask_prices.length > 0) out.add(name);
+    }
+    return [...out];
   }
 
   private onTrades(rows: TradeRow[]): void {

@@ -60,6 +60,15 @@ export const configSchema = z.object({
       /** Creating this file ends the run gracefully: pull quotes, close every position, exit. */
       stopFile: z.string().default("state/STOP"),
       pointsLogFile: z.string().default("data/points_log.csv"),
+      /** One row per finished UTC day (volume, fees, gas, equity change, ...). "" = off. */
+      dailyLogFile: z.string().default("data/daily.csv"),
+      /** run.log is moved to run.log.1 when it grows past this many bytes (0 = never). */
+      logMaxBytes: z.number().int().nonnegative().default(50_000_000),
+      /**
+       * Exit with a restart request (code 75) after the market data or the account data has been unusable for this
+       * long, so a supervisor can start a fresh process with fresh connections. 0 = never.
+       */
+      watchdogMs: z.number().int().nonnegative().default(180_000),
       /** Every log line of a live run is also appended here; the dashboard reads it. "" = off. */
       runLogFile: z.string().default("data/run.log"),
       /** Latest-state snapshot, rewritten every liveEveryMs; the dashboard shows it second by second. "" = off. */
@@ -102,6 +111,8 @@ export const configSchema = z.object({
       minGasBalanceApt: z.number().nonnegative().default(0.05),
       /** Stop quoting for the rest of the UTC day once this much APT of gas has been spent. */
       maxGasAptPerDay: z.number().positive().default(0.5),
+      /** Pull quotes while positions or the account have not been refreshed for this long: the bot is blind. */
+      maxDataStaleMs: z.number().int().positive().default(30_000),
       /**
        * Absolute floor on account equity (USD): below it the bot halts. Unlike `maxDrawdownUsd` (measured from the
        * start of each process) this survives restarts, which is what an unattended run needs. 0 = off.

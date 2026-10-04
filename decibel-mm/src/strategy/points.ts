@@ -31,6 +31,15 @@ interface Pending {
   refMid: number;
 }
 
+export interface DaySummary {
+  day: string;
+  volumeUsd: number;
+  makerVolumeUsd: number;
+  takerVolumeUsd: number;
+  feesUsd: number;
+  gasUsd: number;
+}
+
 export interface PointsStats {
   /** Half-month rebate cycle, e.g. "2026-10-A" (1st-15th) or "2026-10-B" (16th-end), UTC. */
   cycleKey: string;
@@ -70,6 +79,8 @@ export const cycleKeyOf = (ts: number): string => {
  * schedule) and widens when cost exceeds it.
  */
 export class PointsController {
+  /** Called with the finished day's totals just before they are reset. */
+  onDayEnd: ((d: DaySummary) => void) | null = null;
   private pending: Pending[] = [];
   private mult: number;
   private lastControl = 0;
@@ -188,8 +199,14 @@ export class PointsController {
     }
     const key = utcDayKey(ts);
     if (key !== this.day) {
+      // Capture the finished day, switch to the new one, and only then tell the listener: it may call back into stats().
+      const ended: DaySummary | null =
+        this.day !== "" && this.dayVol > 0
+          ? { day: this.day, volumeUsd: this.dayVol, makerVolumeUsd: this.dayMaker, takerVolumeUsd: this.dayTaker, feesUsd: this.dayFees, gasUsd: this.dayGas }
+          : null;
       this.day = key;
       this.dayVol = this.dayMaker = this.dayTaker = this.dayFees = this.dayGas = 0;
+      if (ended) this.onDayEnd?.(ended);
     }
   }
 

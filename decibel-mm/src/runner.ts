@@ -1,7 +1,8 @@
 import { existsSync, unlinkSync } from "node:fs";
 import type { FlattenResult, Logger, MarketMaker } from "./engine.js";
 
-export type RunEnd = "deadline" | "stop" | "halted";
+/** "restart": the watchdog found the data unusable for too long; quotes are pulled and the process should be started afresh. */
+export type RunEnd = "deadline" | "stop" | "halted" | "restart";
 
 export interface RunnerOpts {
   mm: MarketMaker;
@@ -66,6 +67,11 @@ export async function runLoop(o: RunnerOpts): Promise<RunResult> {
       o.log("error", "step failed", { error: String(e) });
     }
     if (o.mm.isHalted) return { end: "halted", flat: null };
+    if (o.mm.restartRequested(now())) {
+      o.log("error", "watchdog: market or account data unusable for too long; pulling quotes and asking for a restart");
+      await o.mm.haltAll();
+      return { end: "restart", flat: null };
+    }
     const wait = o.tickMs - (now() - started);
     if (wait > 0) await sleep(wait);
   }

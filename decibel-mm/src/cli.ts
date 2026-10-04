@@ -39,7 +39,7 @@ async function main(): Promise<void> {
   const cfg = loadConfig(path);
   if (cmd === "paper") return runPaper(cfg, Number(arg("--hours") ?? 6));
   if (cmd === "dashboard") return runDashboard(cfg, path);
-  if (cmd === "live") setRunLogFile(cfg.engine.runLogFile);
+  if (cmd === "live") setRunLogFile(cfg.engine.runLogFile, cfg.engine.logMaxBytes);
   const env = loadLiveEnv();
   const ex = new DecibelExchange({
     network: cfg.network,
@@ -207,6 +207,19 @@ async function runLive(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promi
     },
   });
   const shutdown = new Shutdown({ haltAll: () => mm.haltAll(), close: () => ex.close(), exit: (c) => process.exit(c), log: jsonLogger });
+  // A bug that surfaces as an uncaught error must not leave quotes resting with nobody watching them: pull them, then
+  // exit so that the supervisor starts a fresh process.
+  let crashing = false;
+  const crash = (what: string) => (e: unknown): void => {
+    if (crashing) return;
+    crashing = true;
+    jsonLogger("error", `${what}: pulling quotes and exiting`, { error: String(e instanceof Error ? (e.stack ?? e.message) : e).slice(0, 1500) });
+    const done = (): never => process.exit(70);
+    void Promise.race([mm.haltAll(), new Promise((r) => setTimeout(r, 10_000))]).then(done, done);
+  };
+  process.on("uncaughtException", crash("uncaught exception"));
+  process.on("unhandledRejection", crash("unhandled rejection"));
+  if (!dryRun) await mm.cleanupLeftovers();
   process.on("SIGINT", () => void shutdown.onSignal("SIGINT"));
   process.on("SIGTERM", () => void shutdown.onSignal("SIGTERM"));
 
@@ -229,6 +242,7 @@ async function runLive(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promi
     jsonLogger("error", "halted; exiting");
     process.exit(2);
   }
+  if (res.end === "restart") process.exit(75);
   process.exit(res.flat?.closed ? 0 : 3);
 }
 

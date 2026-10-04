@@ -46,6 +46,12 @@ export interface Exchange {
   /** Optional maker/taker fee rates (decimals, e.g. 0.00015). */
   getFees?(): { maker: number; taker: number } | null;
 
+  /** Optional: how long ago positions and the account were last read successfully (null = never). */
+  dataAge?(): { positionsMs: number | null; accountMs: number | null };
+
+  /** Optional: markets that still have quotes resting on the venue, e.g. left behind by a crashed process. */
+  listResting?(): Promise<string[]>;
+
   /** Optional gas telemetry for venues where the signer pays gas. */
   getGas?(): GasStats | null;
 
