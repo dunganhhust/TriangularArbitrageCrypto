@@ -175,6 +175,34 @@ describe("daily loss limit and equity floor", () => {
     expect(h.logs.some((l) => l.msg.startsWith("new UTC day: quoting again"))).toBe(true);
   });
 
+  it("widens the quotes slowly while the day's loss runs ahead of its schedule, and relaxes when it catches up", async () => {
+    const h = await build({ risk: { maxDailyLossUsd: 2, maxPaceMult: 3 } });
+    await h.run(0, 40);
+    expect(snap(h.mm, T0 + 40_000).lossPace).toBe(1);
+    h.ex.equity = 19.2; // 0.8 USD down by 06:01 with 2 USD allowed per day: well ahead of schedule
+    await h.run(40, 400);
+    const widened = snap(h.mm, T0 + 400_000).lossPace as number;
+    expect(widened).toBeGreaterThan(1.5);
+    expect(widened).toBeLessThanOrEqual(3);
+    // it moved gradually: no more than 10 % per 30 s
+    await h.run(400, 430);
+    expect(snap(h.mm, T0 + 430_000).lossPace).toBeLessThanOrEqual(widened * 1.1 + 1e-9);
+    h.ex.equity = 20;
+    await h.run(430, 1500);
+    expect(snap(h.mm, T0 + 1_500_000).lossPace).toBe(1);
+    expect(h.mm.isHalted).toBe(false);
+  });
+
+  it("no pacing without a daily limit or with maxPaceMult 1", async () => {
+    for (const risk of [{ maxDailyLossUsd: 0 }, { maxDailyLossUsd: 2, maxPaceMult: 1 }]) {
+      const h = await build({ risk });
+      await h.run(0, 10);
+      h.ex.equity = 19;
+      await h.run(10, 200);
+      expect(snap(h.mm, T0 + 200_000).lossPace).toBe(1);
+    }
+  });
+
   it("a loss under the limit changes nothing, and 0 disables the limit", async () => {
     const small = await build({ risk: { maxDailyLossUsd: 1 } });
     await small.run(0, 3);

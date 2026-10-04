@@ -5,11 +5,11 @@ on-chain **bulk order** (one transaction replaces every level), manages inventor
 aggressively it quotes so that it buys as much maker volume (the input to Decibel Amps, streaks
 and any maker campaign) as a cost budget you set allows.
 
-> **Status:** engine, strategy, risk and simulator are tested (`npm test`, 30 tests). The live
-> Decibel adapter type-checks against `@decibeltrade/sdk@0.8.2` but **has not been run against the
-> network** — the build sandbox could not reach Aptos endpoints. Run `check`, then `live --dry-run`
-> on testnet, then tiny size on mainnet. See [docs/RESEARCH.md](docs/RESEARCH.md) for what is and is
-> not verified. This is not financial advice; you can lose money.
+> **Status:** engine, strategy, risk, supervisor, dashboard and simulator are tested (`npm test`). The live
+> Decibel adapter has been run on mainnet with a small account (ETH, short runs); the 24/7 mode and the
+> cost controls described below are new and have only been exercised in the simulator and with stand-in
+> processes. Run `check`, then `live --dry-run`, then tiny size, then watch the first day. See
+> [docs/RESEARCH.md](docs/RESEARCH.md) for what is and is not verified. This is not financial advice; you can lose money.
 
 ## How it optimises for points
 
@@ -149,6 +149,84 @@ The page is reached through an SSH tunnel, and two different things can make it 
   (install steps in its header). The unit sets `KillMode=process` on purpose: a bot started from the buttons is a child of the
   dashboard, and the default would kill it, with its orders still resting, whenever the service restarts.
 
+## Running 24/7
+
+```bash
+cp config.24x7.example.json config.json            # ETH, sizes that follow equity, every unattended-run limit switched on
+node --import tsx src/cli.ts check config.json     # read-only: prints markets, minimum order USD, fees, gas account
+# then either press the "24/7" preset + Bắt đầu on the dashboard, or from a shell:
+node --import tsx src/cli.ts supervise config.json
+# or, to also start after a reboot (optional, see the header of the file):
+sudo cp deploy/decibel-mm.service /etc/systemd/system/ && sudo systemctl enable --now decibel-mm
+```
+
+`supervise` runs `live` (no end time) and starts it again when it dies for a reason a fresh process can fix. It never
+restarts after an outcome that needs a person:
+
+| `live` exits with | Meaning | Supervisor |
+|---|---|---|
+| 0 | End button / `state/STOP` / SIGTERM | stops (exit 0) |
+| 2 | the bot halted itself: drawdown, equity floor, `state/KILL`, gas reserve, ramp loss | stops (exit 2) |
+| 3 | the run ended but a position could not be closed | stops (exit 3) |
+| 1, 70, 75, a signal | crash, uncaught error, watchdog request, killed | restarts after 5 s, 15 s, 30 s, 1 min, 2 min, 5 min |
+
+It gives up (exit 4, runs `cancel`) after 8 starts within an hour, so a broken key or an outage cannot become a restart
+storm. `End` (STOP file) while the bot is down makes the supervisor run `flatten` itself. Status is in
+`state/supervisor.json` and on the dashboard. `sudo systemctl stop decibel-mm` pulls the quotes and keeps the positions.
+
+### What protects an unattended run
+
+| Safeguard | Setting | Behaviour |
+|---|---|---|
+| **Blind pause** | `risk.maxDataStaleMs` | positions or account not refreshed for that long: quotes are pulled until they can be read again |
+| **Watchdog** | `engine.watchdogMs` | blind, or every market's book stale/empty, for that long: quotes pulled, exit 75, supervisor starts a fresh process |
+| **Leftover quotes** | automatic | at start the bot cancels bulk orders an earlier process left resting (`listResting`) |
+| **Crash handler** | automatic | an uncaught error pulls the quotes (10 s limit) and exits 70 |
+| **Daily loss limit** | `risk.maxDailyLossUsd` | past it every position is closed and the bot stays flat until the next UTC day, then resumes alone |
+| **Loss pacing** | `risk.maxPaceMult` | while the day's loss is ahead of a straight-line spend of that limit, quotes widen (x1 up to x3, 10 % per 30 s) so the budget lasts the day |
+| **Equity floor** | `risk.minEquityUsd` | below it: halt (survives restarts, unlike `maxDrawdownUsd` which counts from process start) |
+| **Fuse cool-off** | `fuse.haltMode: "cooloff"` | too many trips in an hour = one long pause (`cooloffMs`), then trading resumes; `"halt"` ends the process as before |
+| **Gas runway** | automatic | `gasRunwayDays` in status; warning under 3 days, error under 1 |
+| **Log rotation** | `engine.logMaxBytes` | `run.log` moves to `run.log.1` past that size and keeps the run's start line |
+| **Daily summary** | `engine.dailyLogFile` | one row per UTC day in `data/daily.csv`, also logged as `daily summary` |
+
+### Cost: what the bot does about it, and what it cannot
+
+The cost of a USD of volume is fixed by the venue (tier 0: maker 1.5 bps, taker 4.5 bps; the 0.5 bps maker rebate is paid
+after the half-month cycle if the maker share is at least 80 %), plus gas, plus adverse selection. **That cost is paid on every
+dollar traded, so more volume means a bigger absolute loss unless the strategy earns more than it costs.** The bot lowers the
+cost per dollar and gives you one number to cap the absolute cost: `risk.maxDailyLossUsd` is what you are willing to pay per
+day for points. The levers:
+
+- **Size per transaction** (`sizing.leverage`, `levelFraction`). Gas is paid per transaction, not per dollar, so bigger
+  levels cut gas per dollar of volume (the largest lever). With `leverage` > 0 the position cap is equity x leverage split over
+  the markets and the level is `levelFraction` of the cap; `maxPositionUsd` / `levelSizeUsd` stay as ceilings. A loss shrinks
+  the book by itself and a deposit grows it. The cap is also what a fast market can cost you: 1.5x leverage means a 2 % move
+  against a full position is 3 % of equity.
+- **Gas in the controller.** With the APT price known (public feeds, `gas.aptUsdFallback` when they are down) gas is part of
+  the cost average the spread controller reads, so quotes widen when fees + adverse selection + gas exceed `points.costBudgetBps`.
+  Set `points.ewmaHalfLifeUsd` / `minSampleUsd` to a few multiples of your hourly volume, or the controller reacts only after
+  days (the defaults assume tens of thousands of dollars).
+- **Economic reprice threshold** (`engine.staleFillProb`, `urgentMinBps`, `urgentMaxBps`). A ladder is re-sent at once when the
+  price drifts past `half spread + gas of one tx in bps of the top level / staleFillProb`: big levels or cheap gas re-quote
+  sooner, tiny levels wait (a stale quote costs about drift x size x P(hit); fixing it costs one transaction).
+  `staleFillProb: 0` restores the fixed `urgentRepriceBps`. 0.3 is a guess; tune it from `replaces` in the status line.
+- **Gas pacing.** Against `risk.maxGasAptPerDay` the bot keeps a straight-line schedule over the UTC day. When it runs ahead,
+  thresholds and refresh intervals stretch (`economy`, up to `engine.economyMaxMult`); at the budget it pulls quotes until
+  tomorrow. Gas spent earlier today by a restarted process counts.
+- **Fewer taker fills.** Taker fills are now told apart: `kind: "reduce"` (our own close-out order) or `"cross"` (a resting
+  order the market reached before it landed, so it executed as a taker). Crossings raise the guard automatically: one more tick
+  away from the opposite touch for every `competition.crossesPerTick` of them in the last hour, up to `maxGuardTicks`.
+- **Encrypted submission costs more gas.** The minimum gas unit price of an encrypted transaction is 200 octas, twice the usual
+  100. The status line shows `gasPerTxApt` for both paths once both have been used. To measure the effect run two comparable
+  stretches with `execution.encrypted` set to `"auto"` and `"off"` and compare gas per volume and markouts. "off" halves the gas
+  of every transaction, and exposes pending replacements to anyone who watches them. Do not switch without a measurement.
+
+What it cannot do: change the fee schedule (volume tiers start at 1M USD per 30 days), make a negative-edge strategy
+profitable, or know the right values of `staleFillProb`, `costBudgetBps` and the spreads for your market. Run it for a day,
+read `data/daily.csv`, the cost card on the dashboard (replaces per hour and per reason, gas bps, taker split, gas per tx by
+path) and the "Kinh tế" table, and move one setting at a time.
+
 ## Several markets
 
 `markets` is a list; every entry is quoted by the same loop with its own ladder, position cap, fuse and ramp-scaled
@@ -253,7 +331,10 @@ src/strategy/quoter.ts   pure ladder construction, replace rules, own-order stri
 src/strategy/points.ts   cost-budget / volume-schedule controller
 src/strategy/risk.ts     pure risk decisions
 src/engine.ts            control loop (injected clock, exchange-agnostic)
+src/runner.ts            run loop (deadline / STOP / watchdog restart) and signal shutdown
+src/supervisor.ts        24/7 supervisor: restarts `live` after crashes, never after a halt or End
 src/exchange/decibel.ts  live adapter (SDK reads + WS, bulk-order writes, Amps telemetry)
+src/exchange/gasmeter.ts gas paid in total and per submission path (encrypted / plain)
 src/exchange/paper.ts    simulator for dry runs and tests
 src/dashboard/           read-only localhost page over data/run.log + data/live.json (analyze.ts, tail.ts, price.ts, server.ts, index.html)
 ```

@@ -123,6 +123,13 @@ export const configSchema = z.object({
        * stays flat until the next UTC day, then resumes by itself. 0 = off.
        */
       maxDailyLossUsd: z.number().nonnegative().default(0),
+      /**
+       * With a daily loss limit, spread the budget over the day: while the loss so far runs ahead of the limit's
+       * linear schedule (limit x fraction of the UTC day elapsed, at least 10 %), quotes are widened by the ratio, up
+       * to this factor, instead of spending it all in the first hours and standing idle for the rest of the day.
+       * 1 = off.
+       */
+      maxPaceMult: z.number().min(1).default(3),
     })
     .default({}),
 

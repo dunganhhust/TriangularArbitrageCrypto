@@ -329,7 +329,7 @@ function render(d) {
     `${isNum(e.aptRunwayHours) ? "<br>đủ ~" + fmt(e.aptRunwayHours, 0) + " giờ" : ""}`));
   const reasons = L.replaces ? Object.entries(L.replaces).filter(([, n]) => n > 0).map(([a, n]) => `${({ initial: "đầu", threat: "bị đe dọa", drift: "giá chạy", fill: "sau khớp", stale: "định kỳ" })[a] || a} ${n}`).join(" · ") : "";
   k.push(card("Đặt lại lệnh & chi phí", isNum(L.replacesLastHour) ? `${L.replacesLastHour} lần / giờ` : "–", "",
-    `gas ${isNum(L.gasBps) ? fmt(L.gasBps, 2) + " bps" : "–"} · ${isNum(L.gasUsd) ? fmt(L.gasUsd, 4) : "–"} USD hôm nay${isNum(L.economy) && L.economy > 1.05 ? ` · <span class="warn">tiết kiệm x${L.economy}</span>` : ""}<br>` +
+    `gas ${isNum(L.gasBps) ? fmt(L.gasBps, 2) + " bps" : "–"} · ${isNum(L.gasUsd) ? fmt(L.gasUsd, 4) : "–"} USD hôm nay${isNum(L.economy) && L.economy > 1.05 ? ` · <span class="warn">tiết kiệm gas x${L.economy}</span>` : ""}${isNum(L.lossPace) && L.lossPace > 1.05 ? ` · <span class="warn">nới giá x${L.lossPace} (lỗ trong ngày đang nhanh hơn nhịp)</span>` : ""}<br>` +
     `${reasons || "chưa có"}<br>taker: ${isNum(L.takerReduce) ? L.takerReduce : "–"} do đóng vị thế · <span class="${L.takerCross ? "warn" : ""}">${isNum(L.takerCross) ? L.takerCross : "–"} do giá chạy tới</span>${L.guardTicks ? ` (cách xa ${L.guardTicks} tick)` : ""}` +
     `${L.gasPerTxApt && (L.gasPerTxApt.encryptedTx || L.gasPerTxApt.plainTx) ? `<br>gas/tx: mã hóa ${isNum(L.gasPerTxApt.encrypted) ? fmt(L.gasPerTxApt.encrypted, 6) : "–"} APT (${L.gasPerTxApt.encryptedTx} tx) · thường ${isNum(L.gasPerTxApt.plain) ? fmt(L.gasPerTxApt.plain, 6) : "–"} APT (${L.gasPerTxApt.plainTx} tx)` : ""}` +
     `${isNum(L.gasRunwayDays) ? `<br>APT đủ ~${fmt(L.gasRunwayDays, 1)} ngày` : ""}`));

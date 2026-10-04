@@ -178,6 +178,9 @@ export class MarketMaker {
   /** Equity at the first look of the current UTC day: the baseline of the daily loss limit. */
   private dayStart: { key: string; equity: number } | null = null;
   private dailyPausedDay: string | null = null;
+  /** >= 1: widening applied while the day's loss runs ahead of its schedule (see risk.maxPaceMult). */
+  private lossPaceMult = 1;
+  private lastPaceAt = 0;
   private lastPausedClose = 0;
   private dayFills = 0;
   private lastRunwayWarn = 0;
@@ -321,7 +324,8 @@ export class MarketMaker {
       return;
     }
 
-    const mult = this.points.spreadMult(now);
+    this.updateLossPace(now, acct?.equityUsd ?? null);
+    const mult = this.points.spreadMult(now) * this.lossPaceMult;
 
     for (const st of this.states.values()) {
       await this.stepMarket(st, now, mult, acct?.equityUsd ?? null);
@@ -421,6 +425,23 @@ export class MarketMaker {
     this.lastPausedClose = now;
     await this.closeOut();
     return true;
+  }
+
+  /**
+   * Slow the quoting down while today's loss is ahead of a straight-line spend of the daily limit. The multiplier moves
+   * by at most 10 % every 30 s, so it never makes the quotes jump (every jump would cost a transaction).
+   */
+  private updateLossPace(now: number, equity: number | null): void {
+    if (now - this.lastPaceAt < 30_000) return;
+    this.lastPaceAt = now;
+    const limit = this.cfg.risk.maxDailyLossUsd;
+    let target = 1;
+    if (limit > 0 && equity !== null && this.dayStart !== null && this.dayStart.key === utcDay(now)) {
+      const lost = Math.max(0, this.dayStart.equity - equity);
+      const allowed = limit * Math.max((now % DAY_MS) / DAY_MS, 0.1);
+      target = Math.min(this.cfg.risk.maxPaceMult, Math.max(1, lost / allowed));
+    }
+    this.lossPaceMult = target > this.lossPaceMult ? Math.min(target, this.lossPaceMult * 1.1) : Math.max(target, this.lossPaceMult / 1.1);
   }
 
   private hasOpenPositions(): boolean {
@@ -821,6 +842,7 @@ export class MarketMaker {
       replaces: { ...this.replaceCounts },
       replacesLastHour: this.replacesLastHour(now),
       economy: round(this.economy, 2),
+      lossPace: round(this.lossPaceMult, 2),
       aptUsd: this.aptUsdNow(),
       gasUsd: round(s.dayGasUsd, 4),
       gasBps: s.dayVolumeUsd > 0 ? round((s.dayGasUsd / s.dayVolumeUsd) * 1e4, 3) : null,
