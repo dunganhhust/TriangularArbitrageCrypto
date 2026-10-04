@@ -112,10 +112,26 @@ It does not guess a formula. It:
   not documented in the types. The adapter detects it from the oracle price and refuses to trade
   when ambiguous (override with `live.priceUnits` / `live.sizeUnits`).
 
+## Gas price and encrypted submission
+
+`@aptos-labs/ts-sdk` sets `MIN_ENCRYPTED_TXN_GAS_UNIT_PRICE = 200` octas; the plain path uses the node's estimate, normally
+the network minimum of 100. So an encrypted transaction pays **about twice the gas** of a plain one for the same work. The
+adapter records gas per path (`GasMeter`), and every `status` line carries `gasPerTxApt: {encrypted, plain, encryptedTx, plainTx}`
+once both paths have been used. Whether encryption protects against anything that matters for a bot of this size is NOT
+measured: compare two stretches with `execution.encrypted` `"auto"` and `"off"` (gas per volume, and the 5 s markout in
+`pnlBps`) before changing it.
+
+Measured on mainnet (ETH/USD, tier 0, 1 h, 2.5 USD levels): 81 transactions, 0.0437 APT, 204 USD volume = 1.78 bps of gas
+per dollar traded; the fee side was 1.78 bps and adverse selection about 1.2 bps. Gas per dollar falls in proportion to the
+size of each fill, which is why `sizing.leverage` is the first lever.
+
 ## Things to verify on testnet before mainnet
 
 1. `npm run check` — units detected correctly, markets listed, fee rates and Amps endpoints return data for your owner address.
-2. A bulk order with a crossing price: does it reject, or take? (The bot never sends one, but confirm the failure mode.)
+2. A bulk order with a crossing price: does it reject, or take? (The bot never sends one on purpose, but the market can reach a
+   resting quote before the transaction lands. Taker fills are now logged with `kind: "reduce"` (our own close-out order) or
+   `"cross"` (a resting order that executed as taker) and counted as `takerCross` / `takerReduce` in the status line: a non-zero
+   `takerCross` on mainnet answers this, and the touch guard (`competition.crossesPerTick`) reacts to it by itself.)
 3. Position `size` sign convention (assumed signed, long > 0).
 4. Whether bulk-order fills appear in `userTradeHistory` with `source = OrderFill` (assumed yes).
 5. How partial fills change the resting bulk order (the bot re-sends the full ladder after any fill, so it self-heals either way).
