@@ -66,6 +66,20 @@ export class VolatilityFuse {
     return this.trips.length;
   }
 
+  /** Time (ms) until which the fuse keeps quotes off; 0 when it is not tripped. */
+  get untilMs(): number {
+    return this.until;
+  }
+
+  /** After a restart: keep quotes off until `until`, as the previous process had decided. Ignored when already past. */
+  restoreUntil(until: number, now: number): void {
+    if (!(until > now)) return;
+    this.until = until;
+    this.recoverUntil = until + this.cfg.recoverMs;
+    this.reason = "restored after a restart";
+    this.pendingJustTripped = false;
+  }
+
   /** Feed one observation and get the current status. */
   observe(now: number, inp: FuseInput): FuseStatus {
     if (!this.cfg.enabled) return { state: "ok" };

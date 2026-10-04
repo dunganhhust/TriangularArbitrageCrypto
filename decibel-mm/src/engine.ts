@@ -617,6 +617,7 @@ export class MarketMaker {
       return;
     }
     if (fz.state === "tripped") {
+      st.lastPause = null; // a fuse pause is not a data outage; the watchdog must not mistake it for one
       if (fz.justTripped) {
         this.tripCount++;
         this.log("warn", "FUSE tripped: pulling quotes", { market: name, reason: fz.reason, pauseSec: Math.round((fz.until - now) / 1000) });
@@ -984,6 +985,7 @@ export class MarketMaker {
           dayStartKey: this.dayStart?.key ?? null,
           dayStartEquity: this.dayStart?.equity ?? null,
           dailyPausedDay: this.dailyPausedDay,
+          fuseUntil: Object.fromEntries([...this.states].map(([n, st]) => [n, st.fuse.untilMs]).filter(([, u]) => (u as number) > this.clock)),
           gasDay: this.gasDay,
           gasSpentApt: this.lastGasApt === null || this.gasDay === "" ? this.gasCarryApt : this.gasSpentToday(this.lastGasApt),
         }),
@@ -997,6 +999,13 @@ export class MarketMaker {
     try {
       const raw = JSON.parse(readFileSync(this.cfg.engine.stateFile, "utf8"));
       if (raw.dayKey === new Date().toISOString().slice(0, 10)) this.points.restore(raw);
+      // A fuse pause in force when the process ended is still in force: a restart must not be a way around it.
+      if (raw.fuseUntil && typeof raw.fuseUntil === "object") {
+        for (const [name, until] of Object.entries(raw.fuseUntil as Record<string, unknown>)) {
+          const st = this.states.get(name);
+          if (st && typeof until === "number") st.fuse.restoreUntil(until, Date.now());
+        }
+      }
       // The daily loss baseline and a pause already in force survive a restart on the same UTC day.
       const today = new Date().toISOString().slice(0, 10);
       if (raw.dayStartKey === today && Number.isFinite(raw.dayStartEquity)) this.dayStart = { key: today, equity: Number(raw.dayStartEquity) };

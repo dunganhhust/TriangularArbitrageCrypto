@@ -304,6 +304,43 @@ describe("gas runway", () => {
   });
 });
 
+describe("fuse pause across a restart", () => {
+  it("keeps quotes off until the time the previous process had decided on", () => {
+    const cfg = { enabled: true, fastMoveBps: 15, fastWindowMs: 5000, slowMoveBps: 40, slowWindowMs: 60_000, spreadBps: 10, oracleDevBps: 15, cooldownMs: 60_000, maxCooldownMs: 1_800_000, recoverMs: 300_000, recoverWiden: 2, haltAfterTripsPerHour: 6, toxicFills: 5, toxicMarkoutBps: 3 };
+    const f = new VolatilityFuse(cfg);
+    f.trip(1000, "x");
+    expect(f.untilMs).toBe(61_000);
+    const g = new VolatilityFuse(cfg);
+    g.restoreUntil(61_000, 20_000);
+    const s = g.observe(30_000, { fair: 100, spreadBps: 1, oracleDevBps: 1 });
+    expect(s).toMatchObject({ state: "tripped", until: 61_000, justTripped: false });
+    expect(g.observe(62_000, { fair: 100, spreadBps: 1, oracleDevBps: 1 }).state).toMatch(/ok|recovering/);
+    const h = new VolatilityFuse(cfg);
+    h.restoreUntil(10_000, 20_000); // already over
+    expect(h.observe(20_001, { fair: 100, spreadBps: 1, oracleDevBps: 1 }).state).toBe("ok");
+  });
+
+  it("the engine saves a running fuse pause and a new process honours it", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(T0);
+    const dir = tmp();
+    const over = { engine: { stateFile: join(dir, "state.json"), liveFile: join(dir, "live.json"), pointsLogFile: join(dir, "p.csv"), dailyLogFile: join(dir, "d.csv") } };
+    const a = await build(over, { persist: true });
+    await a.run(0, 5);
+    expect(a.ourBids()).toBeGreaterThan(0);
+    // trip the fuse of the (only) market the way the toxic-flow check does
+    const fuse = (a.mm as unknown as { states: Map<string, { fuse: VolatilityFuse }> }).states.get(NAME)!.fuse;
+    fuse.trip(T0 + 5_000, "test");
+    await a.run(5, 20); // the engine sees it, pulls the quotes and saves its state
+    expect(a.ourBids()).toBe(0);
+    const b = await build(over, { persist: true });
+    await b.run(0, 20);
+    expect(b.ourBids()).toBe(0); // a restart does not bring quotes back during the pause
+    await b.run(20, 90); // 60 s cool-off from T0+5 s has passed
+    expect(b.ourBids()).toBeGreaterThan(0);
+  });
+});
+
 describe("fuse cool-off", () => {
   const cfg = { enabled: true, fastMoveBps: 15, fastWindowMs: 5000, slowMoveBps: 40, slowWindowMs: 60_000, spreadBps: 10, oracleDevBps: 15, cooldownMs: 60_000, maxCooldownMs: 1_800_000, recoverMs: 300_000, recoverWiden: 2, haltAfterTripsPerHour: 3, toxicFills: 5, toxicMarkoutBps: 3 };
   it("halts after too many trips by default", () => {

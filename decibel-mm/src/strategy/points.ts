@@ -64,6 +64,9 @@ export interface PointsStats {
 }
 
 const DAY_MS = 86_400_000;
+const BUCKET_MS = 300_000;
+const HOUR_BUCKETS = 12;
+const MAX_GAS_BPS = 6;
 const utcDayKey = (ts: number): string => new Date(ts).toISOString().slice(0, 10);
 export const cycleKeyOf = (ts: number): string => {
   const d = new Date(ts);
@@ -95,6 +98,8 @@ export class PointsController {
   private dayGas = 0;
   private ewmaNum = 0; // sum of pnlUsd, decayed
   private ewmaDen = 0; // sum of notional, decayed
+  /** Gas and volume in 5-minute buckets: gas is charged to the volume of the last hour, so a quiet spell cannot pile it up. */
+  private readonly buckets = new Map<number, { gas: number; vol: number }>();
   private now = 0;
   /** Gross markouts (bps, positive = good for us) of the most recent fills. */
   private recentMarkouts: number[] = [];
@@ -125,6 +130,7 @@ export class PointsController {
     this.rollDay(fill.ts);
     const n = fill.price * fill.size;
     this.dayVol += n;
+    this.bucket(fill.ts).vol += n;
     if (fill.isMaker) {
       this.dayMaker += n;
       this.cycleMaker += n;
@@ -144,7 +150,37 @@ export class PointsController {
     if (!(usd > 0)) return;
     this.rollDay(ts);
     this.dayGas += usd;
-    this.ewmaNum -= usd;
+    this.bucket(ts).gas += usd;
+  }
+
+  private bucket(ts: number): { gas: number; vol: number } {
+    const k = Math.floor(ts / BUCKET_MS);
+    let b = this.buckets.get(k);
+    if (!b) {
+      b = { gas: 0, vol: 0 };
+      this.buckets.set(k, b);
+      for (const old of this.buckets.keys()) if (old < k - 2 * (HOUR_BUCKETS)) this.buckets.delete(old);
+    }
+    return b;
+  }
+
+  /**
+   * Gas per traded dollar over the last hour, in bps. Zero until there is some volume to charge it to (at least
+   * `minSampleUsd / 10`), and capped, so that a quiet spell cannot drive the controller to its widest quotes for good.
+   */
+  gasBps(now: number): number {
+    const k = Math.floor(now / BUCKET_MS);
+    let gas = 0;
+    let vol = 0;
+    for (let i = 0; i < HOUR_BUCKETS; i++) {
+      const b = this.buckets.get(k - i);
+      if (b) {
+        gas += b.gas;
+        vol += b.vol;
+      }
+    }
+    if (vol < Math.max(1, this.cfg.minSampleUsd / 10)) return 0;
+    return Math.min(MAX_GAS_BPS, (gas / vol) * 1e4);
   }
 
   /** Resolve fills whose markout horizon elapsed; call with the current mid for each market. */
@@ -222,7 +258,7 @@ export class PointsController {
     const volFrac = cfg.dailyVolumeTargetUsd > 0 ? this.dayVol / cfg.dailyVolumeTargetUsd : 1;
     const behind = volFrac < frac - 0.1;
     const secured = this.dayVol >= cfg.streakMinVolumeUsd;
-    const pnlBps = this.ewmaDen > 0 ? (this.ewmaNum / this.ewmaDen) * 1e4 : 0;
+    const pnlBps = (this.ewmaDen > 0 ? (this.ewmaNum / this.ewmaDen) * 1e4 : 0) - this.gasBps(now);
     const enough = this.ewmaDen >= cfg.minSampleUsd;
     const floorPnl = -cfg.costBudgetBps;
 
@@ -262,7 +298,7 @@ export class PointsController {
       dayTakerVolumeUsd: this.dayTaker,
       dayFeesUsd: this.dayFees,
       dayGasUsd: this.dayGas,
-      ewmaPnlBps: this.ewmaDen > 0 ? (this.ewmaNum / this.ewmaDen) * 1e4 : 0,
+      ewmaPnlBps: (this.ewmaDen > 0 ? (this.ewmaNum / this.ewmaDen) * 1e4 : 0) - this.gasBps(now),
       ewmaSampleUsd: this.ewmaDen,
       spreadMult: this.mult,
       scheduleFrac: this.scheduleFrac(now),

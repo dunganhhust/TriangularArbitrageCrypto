@@ -102,6 +102,22 @@ describe("gas in the cost controller", () => {
     expect(pts.stats(T0 + 86_400_000 * 2).dayGasUsd).toBe(0);
   });
 
+  it("gas is charged to the last hour of volume only, and a quiet spell cannot pile it up", () => {
+    const mk = () => new PointsController({ costBudgetBps: 0.5, minSpreadMult: 0.6, maxSpreadMult: 4, dailyVolumeTargetUsd: 1e5, streakMinVolumeUsd: 1e4, markoutMs: 1000, ewmaHalfLifeUsd: 1000, minSampleUsd: 100, step: 1.05, controlIntervalMs: 1000 });
+    const pts = mk();
+    // gas with no volume at all: nothing to charge it to, so no verdict
+    for (let i = 0; i < 100; i++) pts.onGasCost(0.01, T0 + i * 1000);
+    expect(pts.gasBps(T0 + 100_000)).toBe(0);
+    // a little volume afterwards: capped instead of exploding
+    pts.onFill({ id: "1", market: NAME, side: "buy", price: 100, size: 1, feeUsd: 0, isMaker: true, ts: T0 + 101_000 }, 100);
+    expect(pts.gasBps(T0 + 102_000)).toBe(6);
+    // an hour later the old gas is out of the window
+    const later = T0 + 3 * 3600_000;
+    pts.onFill({ id: "2", market: NAME, side: "buy", price: 100, size: 10, feeUsd: 0, isMaker: true, ts: later }, 100);
+    pts.onGasCost(0.1, later);
+    expect(pts.gasBps(later)).toBeCloseTo((0.1 / 1000) * 1e4, 6);
+  });
+
   it("the engine feeds the gas it paid into the controller once the APT price is known", async () => {
     const h = await build({}, { apt: 1 });
     await h.run(0, 60);
