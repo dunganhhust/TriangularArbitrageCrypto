@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { EXIT_GAVE_UP, Supervisor } from "../src/supervisor.js";
+import { Supervisor } from "../src/supervisor.js";
 import type { Child, ChildExit } from "../src/supervisor.js";
 
 const dirs: string[] = [];
@@ -120,16 +120,57 @@ describe("Supervisor", () => {
     expect(await done).toBe(0);
   });
 
-  it("gives up after too many starts within an hour, cancels the quotes and exits 4", async () => {
+  it("after too many starts within an hour it cancels the quotes and slows down instead of giving up", async () => {
     const h = harness({ backoffMs: [10], maxStartsPerHour: 3 });
     const done = h.sup.run();
     for (let i = 1; i <= 3; i++) (await h.child(i)).exit({ code: 75, signal: null });
     const cancel = await h.child(4);
     expect(cancel.command).toBe("cancel");
     cancel.exit({ code: 0, signal: null });
-    expect(await done).toBe(EXIT_GAVE_UP);
-    expect(h.status()).toMatchObject({ state: "gave-up" });
-    expect(h.logs.some((l) => l.level === "error" && l.msg.includes("giving up"))).toBe(true);
+    // it waits for the oldest start to leave the one-hour window, then tries again
+    const fifth = await h.child(5);
+    expect(fifth.command).toBe("live");
+    expect(h.time() - 1_000_000).toBeGreaterThanOrEqual(3_600_000);
+    expect(h.logs.some((l) => l.level === "error" && l.msg.includes("too many restarts"))).toBe(true);
+    fifth.exit({ code: 0, signal: null });
+    expect(await done).toBe(0);
+  });
+
+  it("the throttled state is visible while it waits", async () => {
+    const h = harness({ backoffMs: [10], maxStartsPerHour: 2 });
+    const done = h.sup.run();
+    for (let i = 1; i <= 2; i++) (await h.child(i)).exit({ code: 1, signal: null });
+    const cancel = await h.child(3);
+    expect(cancel.command).toBe("cancel");
+    cancel.exit({ code: 0, signal: null });
+    expect(h.status()).toMatchObject({ state: "throttled" });
+    h.sup.requestStop();
+    expect(await done).toBe(0);
+  });
+
+  it("a failed close-out keeps the STOP file and reports an unclosed position, so nothing restarts the bot over it", async () => {
+    const h = harness({ backoffMs: [60_000] });
+    const done = h.sup.run();
+    (await h.child(1)).exit({ code: 1, signal: null });
+    h.files.add("STOP");
+    const flat = await h.child(2);
+    flat.exit({ code: 1, signal: null }); // e.g. the helper could not even connect
+    expect(await done).toBe(3);
+    expect(h.files.has("STOP")).toBe(true);
+    expect(h.logs.some((l) => l.level === "error" && l.msg.includes("closing the positions failed"))).toBe(true);
+  });
+
+  it("passes helper arguments (dry run) to flatten and cancel, never to the bot itself", async () => {
+    const h = harness({ backoffMs: [60_000], helperArgs: ["--dry-run"], liveArgs: [] });
+    const done = h.sup.run();
+    const live = await h.child(1);
+    expect(live.args).toEqual([]);
+    live.exit({ code: 1, signal: null });
+    h.files.add("STOP");
+    const flat = await h.child(2);
+    expect(flat.args).toEqual(["--dry-run"]);
+    flat.exit({ code: 0, signal: null });
+    await done;
   });
 
   it("does not restart while the kill file exists", async () => {

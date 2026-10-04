@@ -15,11 +15,10 @@ import type { Logger } from "./engine.js";
  *   exit 3  the run ended but a position could not be closed                -> stop, 3
  *   other   crash, exit 70 (uncaught error), exit 75 (watchdog), signal     -> restart
  *
- * and it gives up (exit 4, quotes cancelled) when it has had to start too many processes within an hour, so a broken
- * configuration or an outage does not turn into a restart storm.
+ * and when it has had to start too many processes within an hour (a broken configuration, an outage) it cancels the
+ * quotes and slows down to the allowed rate instead of stopping: an unattended run with open positions is better served
+ * by a process that keeps trying at a polite pace than by one that gives up after twenty minutes of API trouble.
  */
-
-export const EXIT_GAVE_UP = 4;
 
 export interface ChildExit {
   code: number | null;
@@ -33,7 +32,7 @@ export interface Child {
   kill(signal?: "SIGTERM" | "SIGKILL"): void;
 }
 
-export type SupervisorState = "starting" | "running" | "backoff" | "stopping" | "stopped" | "gave-up";
+export type SupervisorState = "starting" | "running" | "backoff" | "throttled" | "stopping" | "stopped";
 
 export interface SupervisorStatus {
   pid: number;
@@ -64,11 +63,13 @@ export interface SuperviseOpts {
   endsAt?: number | null;
   /** Extra arguments for every `live` process (e.g. --dry-run). */
   liveArgs?: string[];
+  /** Extra arguments for the one-off `flatten` / `cancel` commands (e.g. --dry-run, so a dry run never sends real orders). */
+  helperArgs?: string[];
   /** Pauses before successive restarts; the last one repeats. */
   backoffMs?: number[];
   /** A process that ran at least this long counts as healthy and resets the backoff. */
   healthyMs?: number;
-  /** Give up when this many processes were started within the last hour. */
+  /** Slow down (one start per hour slot) once this many processes were started within the last hour. */
   maxStartsPerHour?: number;
   /** How long a stopping child may take before it is killed. */
   stopGraceMs?: number;
@@ -181,7 +182,7 @@ export class Supervisor {
   /** Run a helper subcommand to completion; returns its exit code. */
   private async runOnce(command: "flatten" | "cancel", attempt: number): Promise<number> {
     this.o.log("warn", `supervisor: running ${command}`);
-    const c = this.o.spawn(command, [], attempt);
+    const c = this.o.spawn(command, [...(this.o.helperArgs ?? [])], attempt);
     this.child = c;
     this.childKind = command;
     const exit = await this.waitFor(c);
@@ -214,17 +215,27 @@ export class Supervisor {
         // The run is meant to be over but no process is alive to finish it: close everything with a one-off command.
         this.o.log("warn", "supervisor: run is over and no process is running; closing positions", { reason: stopRequested ? "stop" : "deadline" });
         const code = await this.runOnce("flatten", this.status.starts);
-        this.remove(this.o.stopFile);
-        return this.end("stopped", code, `closed positions (${stopRequested ? "stop" : "deadline"})`);
+        if (code === 0) {
+          this.remove(this.o.stopFile);
+          return this.end("stopped", 0, `closed positions (${stopRequested ? "stop" : "deadline"})`);
+        }
+        // The close-out itself failed: positions may still be open. Keep the STOP file (it still stands for "end this and
+        // close everything") and report "a position could not be closed" so that nothing restarts the bot over them.
+        this.o.log("error", "supervisor: closing the positions failed; they may still be open", { code });
+        return this.end("stopped", 3, `closing positions failed (exit ${code})`);
       }
 
       const t = this.now();
       while (starts.length > 0 && t - starts[0]! >= HOUR) starts.shift();
       if (starts.length >= this.maxStarts) {
-        this.o.log("error", "supervisor: giving up, too many restarts within an hour; cancelling quotes", { starts: starts.length });
-        this.set({ state: "gave-up", detail: `${starts.length} starts within an hour` });
+        // Too many starts: pull the quotes, then wait until the oldest start leaves the one-hour window.
+        const resumeAt = starts[0]! + HOUR;
+        this.o.log("error", "supervisor: too many restarts within an hour; quotes cancelled, trying again later", { starts: starts.length, afterSec: Math.round((resumeAt - t) / 1000) });
+        this.set({ state: "throttled", detail: `${starts.length} starts within an hour`, nextStartAt: resumeAt });
         await this.runOnce("cancel", this.status.starts);
-        return EXIT_GAVE_UP;
+        this.set({ state: "throttled", nextStartAt: resumeAt });
+        await this.pause(Math.max(1000, resumeAt - this.now()));
+        continue;
       }
       starts.push(t);
 

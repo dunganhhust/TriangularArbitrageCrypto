@@ -63,9 +63,20 @@ describe("Supervisor with real child processes", () => {
     expect(h.starts()).toEqual(["live 1", "sigterm 1"]);
   }, 15_000);
 
-  it("gives up with a cancel run when the bot keeps dying", async () => {
+  it("cancels and then waits instead of giving up when the bot keeps dying", async () => {
     const h = make("1", { maxStartsPerHour: 3 });
-    expect(await h.sup.run()).toBe(4);
+    const done = h.sup.run();
+    // wait until the cancel run has happened, then stop the supervisor while it is throttled
+    for (let i = 0; i < 400; i++) {
+      try {
+        if (h.starts().some((l) => l.startsWith("cancel"))) break;
+      } catch {
+        /* not yet */
+      }
+      await new Promise((r) => setTimeout(r, 25));
+    }
     expect(h.starts()).toEqual(["live 1", "live 2", "live 3", "cancel 3"]);
-  });
+    h.sup.requestStop();
+    expect(await done).toBe(0);
+  }, 15_000);
 });

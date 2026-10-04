@@ -26,12 +26,13 @@ describe("bot service unit", () => {
 
   it("never restarts after a halt, an unclosed position or a supervisor give-up", () => {
     expect(active).toMatch(/Restart=on-failure/);
-    expect(active).toMatch(/RestartPreventExitStatus=2 3 4\b/);
+    expect(active).toMatch(/RestartPreventExitStatus=2 3\b/);
   });
 
   it("gives the bot time to cancel its quotes on stop and does not detach it from the unit", () => {
     expect(active).toMatch(/TimeoutStopSec=(\d+)/);
     expect(Number(/TimeoutStopSec=(\d+)/.exec(active)![1])).toBeGreaterThanOrEqual(60);
     expect(active).not.toMatch(/KillMode=process/); // here the bot SHOULD stop with the unit
+    expect(active).toMatch(/KillMode=mixed/); // one SIGTERM, to the supervisor, which forwards exactly one to the bot
   });
 });

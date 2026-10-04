@@ -99,6 +99,16 @@ async function runCancel(cfg: Config, ex: DecibelExchange): Promise<void> {
 /** Runs `live` under a supervisor that restarts it after crashes; see supervisor.ts for what is and is not restarted. */
 async function runSupervise(cfg: Config, configPath: string): Promise<void> {
   loadLiveEnv(); // fail here, once and clearly, instead of in every restarted process
+  const launched = Date.now();
+  // An End pressed in an earlier session must not close this one's positions on its first look.
+  try {
+    if (existsSync(cfg.engine.stopFile) && statSync(cfg.engine.stopFile).mtimeMs < launched - 1000) {
+      unlinkSync(cfg.engine.stopFile);
+      jsonLogger("warn", "removed a stale STOP file from an earlier session");
+    }
+  } catch {
+    /* best effort */
+  }
   setRunLogFile(cfg.engine.runLogFile, 0); // the supervised processes rotate the file; this one only adds a few lines
   const minutesArg = arg("--minutes");
   let endsAt: number | null = null;
@@ -120,6 +130,7 @@ async function runSupervise(cfg: Config, configPath: string): Promise<void> {
     log: jsonLogger,
     endsAt,
     liveArgs: process.argv.includes("--dry-run") ? ["--dry-run"] : [],
+    helperArgs: process.argv.includes("--dry-run") ? ["--dry-run"] : [], // a dry run must not send real close-out orders either
   });
   process.on("SIGINT", () => sup.requestStop());
   process.on("SIGTERM", () => sup.requestStop());
@@ -238,9 +249,11 @@ async function runLive(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promi
       rampStages: cfg.ramp.enabled ? cfg.ramp.stages : null,
     },
   });
-  // A STOP file left over from an earlier run must not end this one; one written after launch is honoured.
+  // A STOP file left over from an earlier run must not end this one; one written after launch is honoured. Under a
+  // supervisor the supervisor owns this policy (it clears stale files when it starts), so a STOP written while this
+  // process was still loading is not mistaken for a stale one.
   try {
-    if (existsSync(cfg.engine.stopFile) && statSync(cfg.engine.stopFile).mtimeMs < launched - 1000) {
+    if (!process.env.MM_SUPERVISED_ATTEMPT && existsSync(cfg.engine.stopFile) && statSync(cfg.engine.stopFile).mtimeMs < launched - 1000) {
       unlinkSync(cfg.engine.stopFile);
       jsonLogger("warn", "removed a stale STOP file from an earlier run");
     }
@@ -263,17 +276,9 @@ async function runLive(cfg: Config, ex: DecibelExchange, dryRun: boolean): Promi
   });
   const shutdown = new Shutdown({ haltAll: () => mm.haltAll(), close: () => ex.close(), exit: (c) => process.exit(c), log: jsonLogger });
   // A bug that surfaces as an uncaught error must not leave quotes resting with nobody watching them: pull them, then
-  // exit so that the supervisor starts a fresh process.
-  let crashing = false;
-  const crash = (what: string) => (e: unknown): void => {
-    if (crashing) return;
-    crashing = true;
-    jsonLogger("error", `${what}: pulling quotes and exiting`, { error: String(e instanceof Error ? (e.stack ?? e.message) : e).slice(0, 1500) });
-    const done = (): never => process.exit(70);
-    void Promise.race([mm.haltAll(), new Promise((r) => setTimeout(r, 10_000))]).then(done, done);
-  };
-  process.on("uncaughtException", crash("uncaught exception"));
-  process.on("unhandledRejection", crash("unhandled rejection"));
+  // exit 70 so that the supervisor starts a fresh process (see Shutdown.onFatal).
+  process.on("uncaughtException", (e) => shutdown.onFatal("uncaught exception", e));
+  process.on("unhandledRejection", (e) => shutdown.onFatal("unhandled rejection", e));
   if (!dryRun) await mm.cleanupLeftovers();
   process.on("SIGINT", () => void shutdown.onSignal("SIGINT"));
   process.on("SIGTERM", () => void shutdown.onSignal("SIGTERM"));

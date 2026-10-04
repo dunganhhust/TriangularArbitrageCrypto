@@ -20,7 +20,8 @@
 Description=Decibel market maker (supervised, 24/7)
 After=network-online.target
 Wants=network-online.target
-# A restart storm is the supervisor's job to stop (it gives up after 8 starts an hour); this is a second net.
+# A restart storm is the supervisor's job to limit (after 8 starts an hour it cancels the quotes and slows down); this is a
+# second net for the supervisor process itself.
 StartLimitIntervalSec=3600
 StartLimitBurst=6
 
@@ -34,9 +35,12 @@ ExecStart=/bin/bash -lc 'set -a; . /etc/decibel-mm/env; set +a; exec node --impo
 Restart=on-failure
 RestartSec=30
 # 2 = the bot halted itself (loss limit, kill switch, ...): needs a person. 3 = a position could not be closed.
-# 4 = the supervisor gave up after a restart storm. None of these may loop back by themselves.
-RestartPreventExitStatus=2 3 4
-# On stop the supervisor and the bot both get SIGTERM: the bot cancels its quotes (positions are kept) and exits.
+# Neither may loop back by themselves.
+RestartPreventExitStatus=2 3
+# On stop only the supervisor gets SIGTERM; it passes ONE SIGTERM on to the bot, which cancels its quotes (positions are
+# kept) and exits. (With the default KillMode the bot would get a second SIGTERM straight from systemd, and a second
+# signal is how an operator aborts a close-out that is in progress.) Whatever is left after TimeoutStopSec is killed.
+KillMode=mixed
 TimeoutStopSec=90
 
 [Install]

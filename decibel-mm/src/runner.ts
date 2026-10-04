@@ -20,6 +20,8 @@ export interface RunnerOpts {
   remove?: (path: string) => void;
   /** Runs before each step; the simulator uses it to advance its clock. */
   beforeStep?: (now: number) => void;
+  /** Consecutive failing steps after which the run asks for a restart (default 120, i.e. about 30 s). */
+  maxStepFailures?: number;
 }
 
 export interface RunResult {
@@ -56,6 +58,8 @@ export async function runLoop(o: RunnerOpts): Promise<RunResult> {
     return { end: reason, flat };
   };
 
+  let failures = 0;
+  const maxFailures = o.maxStepFailures ?? 120;
   for (;;) {
     const started = now();
     if (o.endsAt !== null && started >= o.endsAt) return finish("deadline");
@@ -63,8 +67,20 @@ export async function runLoop(o: RunnerOpts): Promise<RunResult> {
     try {
       o.beforeStep?.(started);
       await o.mm.step(started);
+      failures = 0;
     } catch (e) {
-      o.log("error", "step failed", { error: String(e) });
+      failures++;
+      // A step that throws never reaches the engine's own health checks, so the runner is the one to notice it keeps failing.
+      if (failures === 1 || failures % 20 === 0) o.log("error", "step failed", { error: String(e), consecutive: failures });
+      if (failures >= maxFailures) {
+        o.log("error", "watchdog: every step is failing; pulling quotes and asking for a restart", { consecutive: failures });
+        try {
+          await o.mm.haltAll();
+        } catch {
+          /* the exit path retries nothing more; the next process cleans up leftovers at start */
+        }
+        return { end: "restart", flat: null };
+      }
     }
     if (o.mm.isHalted) return { end: "halted", flat: null };
     if (o.mm.restartRequested(now())) {
@@ -82,6 +98,8 @@ export interface ShutdownDeps {
   close(): Promise<void>;
   exit(code: number): void;
   log: Logger;
+  /** How long a fatal error waits for the quotes to be pulled before the process exits anyway (default 10 s). */
+  fatalTimeoutMs?: number;
 }
 
 /**
@@ -127,6 +145,31 @@ export class Shutdown {
       }
     })();
     return this.promise;
+  }
+
+  /**
+   * An uncaught error or unhandled rejection. The quotes are pulled (bounded wait) and the process exits with 70, which a
+   * supervisor reads as "restart me". Like a signal, this sets {@link pending} first, so the control loop that sees the
+   * halt a moment later waits for it instead of exiting with its own code (2 = "needs a person") over the cancels.
+   * While positions are being closed the error is only logged: exiting would abandon the close-out half way.
+   */
+  onFatal(what: string, err: unknown): void {
+    const detail = String(err instanceof Error ? (err.stack ?? err.message) : err).slice(0, 1500);
+    if (this.promise) return; // already shutting down
+    if (this.ending) {
+      this.d.log("error", `${what} while closing positions: continuing the close-out`, { error: detail });
+      return;
+    }
+    this.d.log("error", `${what}: pulling quotes and exiting`, { error: detail });
+    this.promise = (async () => {
+      try {
+        await Promise.race([this.d.haltAll(), new Promise<void>((r) => setTimeout(r, this.d.fatalTimeoutMs ?? 10_000))]);
+      } catch {
+        /* exit regardless */
+      } finally {
+        this.d.exit(70);
+      }
+    })();
   }
 
   /** Non-null from the first signal until the process exits. */

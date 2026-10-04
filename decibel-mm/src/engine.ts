@@ -181,6 +181,14 @@ export class MarketMaker {
   /** >= 1: widening applied while the day's loss runs ahead of its schedule (see risk.maxPaceMult). */
   private lossPaceMult = 1;
   private readonly since = new Map<string, number>();
+  /** Last equity reading that passed {@link cleanEquity}. */
+  private equityOk: number | null = null;
+  /** Markets whose last cancel failed: the venue may still hold our quotes there, so it is retried until it works. */
+  private readonly cancelRetry = new Set<string>();
+  private lastCancelRetry = 0;
+  private pausedRetries = 0;
+  /** Counters at the start of the current UTC day, so the daily summary reports the day and not the process. */
+  private dayBase = { replaces: 0, takerCross: 0, takerReduce: 0, trips: 0 };
   private lastPaceAt = 0;
   private lastPausedClose = 0;
   private dayFills = 0;
@@ -244,6 +252,12 @@ export class MarketMaker {
   async step(now: number): Promise<void> {
     if (this.halted) return;
     this.clock = now;
+    // The emergency stop works in every state, including the pauses that return before the per-market checks.
+    if (this.opts.killSwitch?.()) {
+      this.log("error", "HALT", { reason: "kill switch" });
+      await this.haltAll();
+      return;
+    }
 
     for (const f of this.ex.drainFills()) {
       const st = this.states.get(f.market);
@@ -275,22 +289,25 @@ export class MarketMaker {
       this.log("info", "fill", { market: f.market, side: f.side, px: f.price, sz: f.size, maker: f.isMaker, fee: round(f.feeUsd, 4) });
     }
     this.points.tick(now, (m) => this.lastMid.get(m));
+    await this.retryCancels(now);
     await this.checkToxicFlow(now);
     if (this.halted) return;
 
     const acct = this.ex.getAccount();
-    if (acct && this.startEquity === null) this.startEquity = acct.equityUsd;
-    if (acct) {
-      this.rollEquityDay(now, acct.equityUsd);
+    // Every equity-driven decision below (drawdown, floor, daily loss, ramp, sizing) sees the filtered reading.
+    const eq = this.cleanEquity(now, acct ? acct.equityUsd : null);
+    if (eq !== null && this.startEquity === null) this.startEquity = eq;
+    if (eq !== null) {
+      this.rollEquityDay(now, eq);
       const floor = this.cfg.risk.minEquityUsd;
       // Sustained, not a single reading: one bad reply from the account endpoint must not end an unattended run for good.
-      if (floor > 0 && this.sustained("equity-floor", acct.equityUsd < floor, now)) {
-        this.log("error", "HALT", { reason: `equity ${round(acct.equityUsd, 2)} USD below the floor`, minEquityUsd: floor });
+      if (floor > 0 && this.sustained("equity-floor", eq < floor, now)) {
+        this.log("error", "HALT", { reason: `equity ${round(eq, 2)} USD below the floor`, minEquityUsd: floor });
         await this.haltAll();
         return;
       }
     }
-    if (await this.dailyLossGate(now, acct?.equityUsd ?? null)) {
+    if (await this.dailyLossGate(now, eq)) {
       this.updateHealth(now);
       await this.housekeeping(now);
       return;
@@ -317,7 +334,7 @@ export class MarketMaker {
       return;
     }
 
-    const ramp = this.ramp.update(now, acct?.equityUsd ?? null, { fills: this.fillCount, trips: this.tripCount });
+    const ramp = this.ramp.update(now, eq, { fills: this.fillCount, trips: this.tripCount });
     if (ramp.kind === "advanced") this.log("info", "ramp: stage up", { from: ramp.from, to: ramp.to, sizeMult: this.ramp.mult });
     if (ramp.kind === "demoted") this.log("warn", "ramp: stage down after loss", { from: ramp.from, to: ramp.to, lossPct: round(ramp.lossPct, 2), sizeMult: this.ramp.mult });
     if (ramp.kind === "exhausted") {
@@ -326,11 +343,11 @@ export class MarketMaker {
       return;
     }
 
-    this.updateLossPace(now, acct?.equityUsd ?? null);
+    this.updateLossPace(now, eq);
     const mult = this.points.spreadMult(now) * this.lossPaceMult;
 
     for (const st of this.states.values()) {
-      await this.stepMarket(st, now, mult, acct?.equityUsd ?? null);
+      await this.stepMarket(st, now, mult, eq);
       if (this.halted) return;
     }
 
@@ -348,15 +365,28 @@ export class MarketMaker {
       resting = [...this.states.keys()];
     }
     const mine = resting.filter((n) => this.states.has(n));
-    for (const name of mine) {
-      try {
-        await this.ex.cancelAll(name);
-      } catch (e) {
-        this.log("error", "cleanup: cancel failed", { market: name, error: String(e) });
-      }
+    const failed: string[] = [];
+    for (const name of mine) if (!(await this.cancelMarket(this.states.get(name)!))) failed.push(name);
+    if (mine.length > 0) {
+      this.log(failed.length ? "error" : "warn", failed.length ? "startup: could not cancel quotes left behind by an earlier process (retrying)" : "startup: cancelled quotes left behind by an earlier process", { markets: mine, failed });
     }
-    if (mine.length > 0) this.log("warn", "startup: cancelled quotes left behind by an earlier process", { markets: mine });
     return mine;
+  }
+
+  /**
+   * The account's equity with obvious garbage held back. A reading that is not a number, or is zero or negative, or is
+   * 40 % away from the last accepted one is believed only when it persists for 12 s; until then the last good value stands.
+   * The account endpoint is polled, and one bad reply must not trip the drawdown stop, the equity floor, the daily loss
+   * pause or the equity-based sizing.
+   */
+  private cleanEquity(now: number, raw: number | null): number | null {
+    if (raw === null || !Number.isFinite(raw)) return this.equityOk;
+    const prev = this.equityOk;
+    const implausible = prev !== null && (raw <= 0 || Math.abs(raw - prev) / Math.max(prev, 1e-9) > 0.4);
+    if (implausible && !this.sustained("equity-jump", true, now)) return prev;
+    if (!implausible) this.sustained("equity-jump", false, now);
+    this.equityOk = raw;
+    return raw;
   }
 
   /**
@@ -421,7 +451,7 @@ export class MarketMaker {
     if (this.dailyPausedDay === day) {
       if (now - this.lastPausedClose >= 30_000 && this.hasOpenPositions()) {
         this.lastPausedClose = now;
-        await this.closeOut(1);
+        await this.closeOut(1, Math.min(4, ++this.pausedRetries)); // a wider limit each time the last one did not fill
       }
       return true;
     }
@@ -480,13 +510,14 @@ export class MarketMaker {
       gasUsd: round(d.gasUsd, 4),
       equityStart: this.dayStart && this.dayStart.key === d.day ? round(this.dayStart.equity, 4) : null,
       equityEnd: eq === null ? null : round(eq, 4),
-      replaces: Object.values(this.replaceCounts).reduce((a, b) => a + b, 0),
-      takerCross: this.takerCross,
-      takerReduce: this.takerReduce,
-      fuseTrips: this.tripCount,
+      replaces: Object.values(this.replaceCounts).reduce((a, b) => a + b, 0) - this.dayBase.replaces,
+      takerCross: this.takerCross - this.dayBase.takerCross,
+      takerReduce: this.takerReduce - this.dayBase.takerReduce,
+      fuseTrips: this.tripCount - this.dayBase.trips,
       spreadMult: round(this.points.stats(this.clock).spreadMult, 3),
     };
     this.dayFills = 0;
+    this.dayBase = { replaces: Object.values(this.replaceCounts).reduce((a, b) => a + b, 0), takerCross: this.takerCross, takerReduce: this.takerReduce, trips: this.tripCount };
     this.log("info", "daily summary", row);
     const file = this.cfg.engine.dailyLogFile;
     if (!file || !this.opts.persist) return;
@@ -590,6 +621,7 @@ export class MarketMaker {
     if (avg === null || avg > -f.toxicMarkoutBps) return;
     this.points.resetToxicity();
     for (const st of this.states.values()) {
+      if (st.fuseStatus.state === "tripped") continue; // already off; do not stack another trip on a running pause
       const s = st.fuse.trip(now, `toxic flow: last ${f.toxicFills} fills averaged ${round(avg, 1)} bps`);
       st.fuseStatus = s;
       if (s.state === "halt") {
@@ -638,10 +670,7 @@ export class MarketMaker {
         this.tripCount++;
         this.log("warn", "FUSE tripped: pulling quotes", { market: name, reason: fz.reason, pauseSec: Math.round((fz.until - now) / 1000) });
       }
-      if (st.live) {
-        await this.ex.cancelAll(name);
-        st.live = st.placed = null;
-      }
+      if (st.live) await this.cancelMarket(st);
       st.dirty = true;
       return;
     }
@@ -681,8 +710,7 @@ export class MarketMaker {
       if (st.lastPause !== risk.reason) this.log("warn", "pause", { market: name, reason: risk.reason });
       st.lastPause = risk.reason;
       if (st.live) {
-        await this.ex.cancelAll(name);
-        st.live = st.placed = null;
+        await this.cancelMarket(st);
         st.dirty = true;
       }
       return;
@@ -765,9 +793,10 @@ export class MarketMaker {
     const z = this.cfg.sizing;
     let cap = st.cfg.maxPositionUsd;
     let level = st.cfg.levelSizeUsd;
-    if (z.leverage > 0 && equity !== null && equity > 0) {
-      if (this.sizingEquity === null || Math.abs(equity - this.sizingEquity) / this.sizingEquity > z.rebalanceTol) this.sizingEquity = equity;
-      cap = Math.min(cap, (this.sizingEquity * z.leverage) / this.states.size);
+    if (z.leverage > 0) {
+      if (equity !== null && equity > 0 && (this.sizingEquity === null || Math.abs(equity - this.sizingEquity) / this.sizingEquity > z.rebalanceTol)) this.sizingEquity = equity;
+      // No usable equity reading yet: quote nothing rather than the largest size the config allows.
+      cap = this.sizingEquity === null ? 0 : Math.min(cap, (this.sizingEquity * z.leverage) / this.states.size);
       level = Math.min(level, cap * z.levelFraction);
     }
     return { maxPos: cap * scale, level: level * scale };
@@ -1055,7 +1084,7 @@ export class MarketMaker {
   }
 
   /** Close every open position with reduce-only IOC orders (the quotes must already be off). Does not stop the engine. */
-  private async closeOut(attemptsWanted?: number): Promise<FlattenResult> {
+  private async closeOut(attemptsWanted?: number, firstSlip = 0): Promise<FlattenResult> {
     const sleep = this.opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     let orders = 0;
 
@@ -1073,8 +1102,9 @@ export class MarketMaker {
     for (let attempt = 0; attempt < attempts; attempt++) {
       const todo = open();
       if (todo.length === 0) break;
-      const slip = FLATTEN_SLIPPAGE_BPS[attempt]! / 1e4;
-      this.log("info", "flatten: attempt", { attempt: attempt + 1, slippageBps: FLATTEN_SLIPPAGE_BPS[attempt], positions: Object.fromEntries(todo.map((t) => [t.name, t.pos])) });
+      const slipBps = FLATTEN_SLIPPAGE_BPS[Math.min(firstSlip + attempt, FLATTEN_SLIPPAGE_BPS.length - 1)]!;
+      const slip = slipBps / 1e4;
+      this.log("info", "flatten: attempt", { attempt: attempt + 1, slippageBps: slipBps, positions: Object.fromEntries(todo.map((t) => [t.name, t.pos])) });
       for (const { name, pos, size } of todo) {
         const book = this.ex.getBook(name);
         const touch = pos > 0 ? book?.bids[0]?.price : book?.asks[0]?.price;
@@ -1115,17 +1145,47 @@ export class MarketMaker {
 
   async haltAll(): Promise<void> {
     this.halted = true;
-    await this.cancelAll();
+    await this.cancelAll(5);
   }
 
-  /** Pull every resting quote. Called on shutdown and on halt. */
-  async cancelAll(): Promise<void> {
+  /**
+   * Cancel one market's quotes. Resolves with whether the venue accepted it. A failure is remembered, and the quotes are
+   * still believed to be resting: the engine retries until the cancel goes through.
+   */
+  private async cancelMarket(st: MarketState): Promise<boolean> {
+    let ok = false;
+    try {
+      ok = await this.ex.cancelAll(st.spec.name);
+    } catch (e) {
+      this.log("error", "cancelAll failed", { market: st.spec.name, error: String(e) });
+    }
+    if (ok) {
+      st.live = st.placed = null;
+      this.cancelRetry.delete(st.spec.name);
+    } else {
+      this.cancelRetry.add(st.spec.name);
+      this.log("warn", "cancel not accepted; quotes may still be resting, retrying", { market: st.spec.name });
+    }
+    return ok;
+  }
+
+  /** Called every step: markets whose cancel failed are tried again every 5 s, in whatever state the engine is. */
+  private async retryCancels(now: number): Promise<void> {
+    if (this.cancelRetry.size === 0 || now - this.lastCancelRetry < 5000) return;
+    this.lastCancelRetry = now;
+    for (const name of [...this.cancelRetry]) {
+      const st = this.states.get(name);
+      if (st) await this.cancelMarket(st);
+    }
+  }
+
+  /** Pull every resting quote, trying each market up to `attempts` times. Called on shutdown, on halt and for pauses. */
+  async cancelAll(attempts = 3): Promise<void> {
+    const sleep = this.opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
     for (const st of this.states.values()) {
-      try {
-        await this.ex.cancelAll(st.spec.name);
-        st.live = st.placed = null;
-      } catch (e) {
-        this.log("error", "cancelAll failed", { market: st.spec.name, error: String(e) });
+      for (let i = 0; i < attempts; i++) {
+        if (await this.cancelMarket(st)) break;
+        if (i < attempts - 1) await sleep(700);
       }
     }
   }

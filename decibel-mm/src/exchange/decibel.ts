@@ -224,6 +224,7 @@ export class DecibelExchange implements Exchange {
   private timers: NodeJS.Timeout[] = [];
   private readonly gas = new GasMeter();
   private balanceApt: number | null = null;
+  private balanceMisses = 0;
   private positionsOkAt: number | null = null;
   private accountOkAt: number | null = null;
   private makerRate = 0.00011;
@@ -390,10 +391,14 @@ export class DecibelExchange implements Exchange {
     try {
       const octas = await this.write.aptos.getAccountAPTAmount({ accountAddress: this.write.account.accountAddress });
       this.balanceApt = Number(octas) / 1e8;
+      this.balanceMisses = 0;
     } catch (e) {
-      // A key that never received funds has no on-chain account yet: that is a zero balance.
-      if (/not\s*found|404|does not exist/i.test(String(e))) this.balanceApt = 0;
-      else this.log("gas balance lookup failed", { error: String(e).slice(0, 160) });
+      // A key that never received funds has no on-chain account yet: that is a zero balance. A single "not found" from a
+      // flaky node is not: the engine halts on a zero balance, so it takes three in a row (45 s) to believe it.
+      if (/not\s*found|404|does not exist/i.test(String(e))) {
+        if (++this.balanceMisses >= 3) this.balanceApt = 0;
+        else this.log("gas balance lookup said not found; keeping the last value", { misses: this.balanceMisses });
+      } else this.log("gas balance lookup failed", { error: String(e).slice(0, 160) });
     }
   }
 

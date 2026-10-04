@@ -69,7 +69,8 @@ Làm lần lượt, không bỏ bước. Mở dashboard như mọi lần (đư�
    thẻ "Đặt lại lệnh & chi phí" có số liệu, `Giới hạn đang áp dụng` ≈ vốn × 1,5.
 2. **Chạy thật 2 giờ:** bỏ tick chạy thử, nhập `120`, bấm **Bắt đầu**. Hết giờ bot tự đóng vị thế. Đọc thẻ chi phí
    (số lần đặt lại/giờ, gas bps, taker) và bảng "Kinh tế".
-3. **Chạy 24/7:** bấm nút preset **24/7** rồi **Bắt đầu**. Bot chạy không giờ kết thúc, tự khởi động lại khi lỗi.
+3. **Chạy 24/7:** tick ô **chạy liên tục 24/7** (không nhớ giữa các lần mở trang, phải tick mỗi lần) rồi bấm **Bắt đầu**.
+   Bot chạy không giờ kết thúc, tự khởi động lại khi lỗi.
 
 Dừng: bấm **Kết thúc & đóng vị thế** (hủy lệnh, đóng toàn bộ vị thế, thoát, không tự chạy lại).
 Dừng khẩn không đóng vị thế: `touch state/KILL` (nhớ xóa file này trước lần chạy sau).
@@ -109,6 +110,7 @@ lệnh thay thế hiện công khai trước khi vào khối. Không đổi nế
 | "BOT TỰ DỪNG" + lý do drawdown / equity | Chạm giới hạn lỗ tổng | Xem Positions trong app; tìm hiểu nguyên nhân trước khi bắt đầu lại |
 | Cảnh báo "giới hạn lỗ trong ngày" | Đã mất hết ngân sách ngày | Không cần làm gì, bot tự chạy lại ngày UTC mới |
 | "Lỗi, bot đã tự khởi động lại" | Bot gặp lỗi/mất dữ liệu và được dựng lại | Xem bảng Sự kiện; nếu lặp lại nhiều lần mỗi giờ thì kiểm tra khóa API và mạng |
-| Giám sát thoát với mã 4 | Quá 8 lần khởi động trong 1 giờ, đã hủy lệnh | Sửa nguyên nhân (khóa API, mạng, APT), rồi bấm Bắt đầu |
+| Trạng thái giám sát "throttled" | Quá 8 lần khởi động trong 1 giờ: đã hủy lệnh, đang chờ để thử lại (mỗi giờ tối đa 8 lần) | Sửa nguyên nhân (khóa API, mạng, APT); nó tự chạy lại khi hết chờ, hoặc bấm Kết thúc để đóng vị thế |
+| Giám sát thoát với mã 3 | Lệnh đóng vị thế bị lỗi, vị thế có thể còn mở | Mở Positions trong app, đóng tay nếu cần; file `state/STOP` được giữ lại để lần sau đóng tiếp |
 | "APT trong ví ký chỉ đủ ~N ngày" | Sắp hết gas | Nạp APT vào ví ký (địa chỉ có trong `check` → `signer`) |
 | Muốn biết còn lệnh treo không | | `node --import tsx src/cli.ts cancel config.json` hủy mọi lệnh và liệt kê lệnh còn lại |

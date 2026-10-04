@@ -121,7 +121,9 @@ export class VolatilityFuse {
       this.trips = [];
       reason = `${text}; cooling off ${Math.round(cooldown / 60_000)} min`;
     }
-    this.until = now + cooldown;
+    // A trip that arrives while a pause is running can lengthen it, never shorten it (a cool-off must not be cut to a minute
+    // by a toxic-flow trip a few seconds later).
+    this.until = Math.max(this.until, now + cooldown);
     this.recoverUntil = this.until + this.cfg.recoverMs;
     this.reason = reason;
     this.samples = []; // the post-move price is the new baseline

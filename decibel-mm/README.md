@@ -154,7 +154,7 @@ The page is reached through an SSH tunnel, and two different things can make it 
 ```bash
 cp config.24x7.example.json config.json            # ETH, sizes that follow equity, every unattended-run limit switched on
 node --import tsx src/cli.ts check config.json     # read-only: prints markets, minimum order USD, fees, gas account
-# then either press the "24/7" preset + Bắt đầu on the dashboard, or from a shell:
+# then either tick "chạy liên tục 24/7" + Bắt đầu on the dashboard, or from a shell:
 node --import tsx src/cli.ts supervise config.json
 # or, to also start after a reboot (optional, see the header of the file):
 sudo cp deploy/decibel-mm.service /etc/systemd/system/ && sudo systemctl enable --now decibel-mm
@@ -170,25 +170,32 @@ restarts after an outcome that needs a person:
 | 3 | the run ended but a position could not be closed | stops (exit 3) |
 | 1, 70, 75, a signal | crash, uncaught error, watchdog request, killed | restarts after 5 s, 15 s, 30 s, 1 min, 2 min, 5 min |
 
-It gives up (exit 4, runs `cancel`) after 8 starts within an hour, so a broken key or an outage cannot become a restart
-storm. `End` (STOP file) while the bot is down makes the supervisor run `flatten` itself. Status is in
-`state/supervisor.json` and on the dashboard. `sudo systemctl stop decibel-mm` pulls the quotes and keeps the positions.
+After 8 starts within an hour (a broken key, an outage) it runs `cancel` and slows down to one start per hour slot instead of
+stopping: with positions open, a process that keeps trying at a polite pace beats one that gives up. `End` (STOP file) while
+the bot is down makes the supervisor run `flatten` itself; if that fails the STOP file stays and the supervisor exits 3, so
+nothing restarts the bot over an open position. A stale STOP file from an earlier session is removed when the supervisor
+starts. `--dry-run` is passed to the helper commands too. Status is in `state/supervisor.json` and on the dashboard.
+`sudo systemctl stop decibel-mm` (the unit uses `KillMode=mixed`: one SIGTERM, to the supervisor, which forwards one to the
+bot) pulls the quotes and keeps the positions.
 
 ### What protects an unattended run
 
 | Safeguard | Setting | Behaviour |
 |---|---|---|
+| **Equity reading filter** | automatic | a reading of zero/negative, not a number, or 40 % away from the last good one counts only after it persists for 12 s; drawdown stop, equity floor, daily pause, ramp and sizing all use the filtered value |
 | **Blind pause** | `risk.maxDataStaleMs` | positions or account not refreshed for that long: quotes are pulled until they can be read again |
-| **Watchdog** | `engine.watchdogMs` | blind, or every market's book stale/empty, for that long: quotes pulled, exit 75, supervisor starts a fresh process |
+| **Failed cancels** | automatic | a cancel the venue did not accept is retried (3 tries; 5 on a halt) and then every 5 s, in any state; the quotes are still treated as resting until it works |
+| **Kill switch** | `state/KILL` | halts in every state, including the pauses |
+| **Watchdog** | `engine.watchdogMs` | blind, or every market's book stale/empty, for that long (a fuse pause does not count): quotes pulled, exit 75, supervisor starts a fresh process. A step that throws on 120 consecutive ticks (about 30 s) does the same |
 | **Leftover quotes** | automatic | at start the bot cancels bulk orders an earlier process left resting (`listResting`) |
-| **Crash handler** | automatic | an uncaught error pulls the quotes (10 s limit) and exits 70 |
+| **Crash handler** | automatic | an uncaught error or unhandled rejection pulls the quotes (10 s limit) and exits 70 (restart me). While positions are being closed it only logs |
 | **Daily loss limit** | `risk.maxDailyLossUsd` | past it every position is closed and the bot stays flat until the next UTC day, then resumes alone |
 | **Loss pacing** | `risk.maxPaceMult` | while the day's loss is ahead of a straight-line spend of that limit, quotes widen (x1 up to x3, 10 % per 30 s) so the budget lasts the day |
 | **Equity floor** | `risk.minEquityUsd` | below it: halt (survives restarts, unlike `maxDrawdownUsd` which counts from process start) |
-| **Fuse cool-off** | `fuse.haltMode: "cooloff"` | too many trips in an hour = one long pause (`cooloffMs`), then trading resumes; `"halt"` ends the process as before |
+| **Fuse cool-off** | `fuse.haltMode: "cooloff"` | too many trips in an hour = one long pause (`cooloffMs`), then trading resumes; `"halt"` ends the process as before. A later trip never shortens a running pause, and shock fills resolving during a pause do not count as a second trip. The pause survives a restart |
 | **Gas runway** | automatic | `gasRunwayDays` in status; warning under 3 days, error under 1 |
 | **Log rotation** | `engine.logMaxBytes` | `run.log` moves to `run.log.1` past that size and keeps the run's start line |
-| **Daily summary** | `engine.dailyLogFile` | one row per UTC day in `data/daily.csv`, also logged as `daily summary` |
+| **Daily summary** | `engine.dailyLogFile` | one row per UTC day in `data/daily.csv`, also logged as `daily summary` (volume, fills and the counters are for the day; fees and gas restart with the process) |
 
 ### Cost: what the bot does about it, and what it cannot
 

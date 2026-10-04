@@ -43,18 +43,33 @@ describe("circuit breaker in the engine", () => {
     expect(h.logs.some((l) => l.msg === "FUSE tripped: pulling quotes")).toBe(true);
     expect(ourBids(h.ex)).toBe(0);
     expect(h.mm.isHalted).toBe(false);
-    await h.run(40, 120);
-    expect(ourBids(h.ex)).toBeGreaterThan(0); // back after the pause
+    // The 40 s pause is over at 70 s; quotes come back then (a later, separate toxic-flow trip may pull them again).
+    let quotedAgain = false;
+    for (let t = 40; t < 120; t++) {
+      await h.run(t, t + 1);
+      if (t >= 70 && ourBids(h.ex) > 0) quotedAgain = true;
+    }
+    expect(quotedAgain).toBe(true);
+  });
+
+  it("does not trip the fuse a second time for the same shock while it is still paused", async () => {
+    const h = await setup({ paper: { seed: 11, flowPerSec: 0.5, shockAtSec: 30, shockPct: -1 }, fuse: { cooldownMs: 40_000, recoverMs: 20_000 } });
+    await h.run(0, 69);
+    // the shock fills resolve their markouts during the pause: that is the same event, not a new trip
+    expect(h.logs.filter((l) => l.msg === "FUSE tripped: pulling quotes")).toHaveLength(1);
   });
 
   it("quotes wider while recovering than in calm conditions", async () => {
     const h = await setup({ paper: { seed: 12, flowPerSec: 0.1, shockAtSec: 20, shockPct: 0.5 }, fuse: { cooldownMs: 10_000, recoverMs: 60_000, recoverWiden: 3 } });
-    const lastQuoted = (): Ladder => [...h.sent].reverse().find((l) => l.bids.length > 0 && l.asks.length > 0)!;
     const width = (l: Ladder): number => l.asks[0]!.price - l.bids[0]!.price;
+    const twoSided = (l: Ladder): boolean => l.bids.length > 0 && l.asks.length > 0;
     await h.run(0, 15);
-    const calmWidth = width(lastQuoted());
-    await h.run(15, 50); // shock at 20s, pause, then recovery
-    expect(width(lastQuoted())).toBeGreaterThan(calmWidth * 1.5);
+    const calmWidth = width([...h.sent].reverse().find(twoSided)!);
+    await h.run(15, 50); // shock at 20 s, pause, then recovery
+    const pulled = h.sent.findIndex((l, i) => i > 0 && l.bids.length === 0 && l.asks.length === 0); // the cancel at the trip
+    expect(pulled).toBeGreaterThan(0);
+    const first = h.sent.slice(pulled).find(twoSided)!; // the first ladder after the pause
+    expect(width(first)).toBeGreaterThan(calmWidth * 1.5);
   });
 
   it("halts the bot after too many trips in an hour", async () => {

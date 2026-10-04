@@ -128,10 +128,11 @@
     <h2>Điều khiển phiên chạy</h2>
     <div id="ctlStatus"></div>
     <div class="ctl">
-      <label class="inline">Thời gian chạy <input id="ctlMin" type="number" min="0" max="10080" step="1" value="120"> phút <span class="muted">(0 = chạy liên tục 24/7)</span></label>
+      <label class="inline">Thời gian chạy <input id="ctlMin" type="number" min="1" max="10080" step="1" value="120"> phút</label>
       <span class="seg" id="ctlPresets">
-        <button data-m="30">30 phút</button><button data-m="60">1 giờ</button><button data-m="120">2 giờ</button><button data-m="360">6 giờ</button><button data-m="1440">24 giờ</button><button data-m="0">24/7</button>
+        <button data-m="30">30 phút</button><button data-m="60">1 giờ</button><button data-m="120">2 giờ</button><button data-m="360">6 giờ</button><button data-m="1440">24 giờ</button>
       </span>
+      <label class="inline"><input id="ctlForever" type="checkbox"> <b>chạy liên tục 24/7</b> (không giờ kết thúc)</label>
       <label class="inline"><input id="ctlDry" type="checkbox"> chạy thử (không gửi giao dịch)</label>
       <button id="btnStart" class="btn go" disabled>▶ Bắt đầu</button>
       <button id="btnStop" class="btn stop" disabled>■ Kết thúc &amp; đóng vị thế</button>
@@ -140,7 +141,7 @@
       <label class="inline">Mã điều khiển <input id="ctlToken" type="password" autocomplete="off" placeholder="dán nội dung file state/dashboard.token"></label>
       <span id="ctlMsg"></span>
     </div>
-    <div class="sub"><b>Chế độ 24/7 (0 phút):</b> không có giờ kết thúc; nếu bot gặp lỗi hoặc mất dữ liệu thị trường thì được tự khởi động lại (tối đa 8 lần mỗi giờ, nghỉ dài dần), nhưng KHÔNG tự chạy lại sau khi tự dừng vì lỗ/khóa khẩn cấp hay sau khi bấm Kết thúc. Hết giờ, hoặc khi bấm Kết thúc, bot hủy mọi lệnh, đóng toàn bộ vị thế bằng lệnh thị trường (reduce-only, mở rộng giá giới hạn dần qua tối đa 5 lần thử) rồi thoát. Việc đóng vị thế trả phí taker. Dừng khẩn không đóng vị thế: tạo file <span class="mono">state/KILL</span>.</div>
+    <div class="sub"><b>Chế độ 24/7 (tick ô "chạy liên tục"):</b> không có giờ kết thúc; nếu bot gặp lỗi hoặc mất dữ liệu thị trường thì được tự khởi động lại (tối đa 8 lần mỗi giờ, nghỉ dài dần), nhưng KHÔNG tự chạy lại sau khi tự dừng vì lỗ/khóa khẩn cấp hay sau khi bấm Kết thúc. Hết giờ, hoặc khi bấm Kết thúc, bot hủy mọi lệnh, đóng toàn bộ vị thế bằng lệnh thị trường (reduce-only, mở rộng giá giới hạn dần qua tối đa 5 lần thử) rồi thoát. Việc đóng vị thế trả phí taker. Dừng khẩn không đóng vị thế: tạo file <span class="mono">state/KILL</span>.</div>
   </div>
 
   <div id="alerts" class="alerts"></div>
@@ -426,19 +427,21 @@ const CTL = { busy: false, msg: "", msgCls: "" };
 let TOKEN = "";
 try { TOKEN = localStorage.getItem("mm.token") || ""; } catch (e) { /* ignore */ }
 $("ctlToken").value = TOKEN;
-$("ctlMin").value = S.ctlMin === 0 ? 0 : S.ctlMin || 120;
+$("ctlMin").value = S.ctlMin || 120;
 $("ctlDry").checked = !!S.ctlDry;
 $("ctlToken").addEventListener("input", () => {
   TOKEN = $("ctlToken").value.trim();
   try { localStorage.setItem("mm.token", TOKEN); } catch (e) { /* ignore */ }
   if (lastData) renderControl(lastData);
 });
-$("ctlMin").addEventListener("change", () => { const v = Number($("ctlMin").value); S.ctlMin = v === 0 ? 0 : Math.min(10080, Math.max(1, Math.round(v || 120))); $("ctlMin").value = S.ctlMin; save(); });
+$("ctlMin").addEventListener("change", () => { S.ctlMin = Math.min(10080, Math.max(1, Math.round(Number($("ctlMin").value) || 120))); $("ctlMin").value = S.ctlMin; save(); });
+// 24/7 is never remembered between page loads: it has to be ticked on purpose each time.
+$("ctlForever").addEventListener("change", () => { $("ctlMin").disabled = $("ctlForever").checked; });
 $("ctlDry").addEventListener("change", () => { S.ctlDry = $("ctlDry").checked; save(); });
 $("ctlPresets").addEventListener("click", (ev) => {
   const b = ev.target.closest("button");
   if (!b) return;
-  S.ctlMin = Number(b.dataset.m); $("ctlMin").value = S.ctlMin; save();
+  S.ctlMin = Number(b.dataset.m); $("ctlMin").value = S.ctlMin; $("ctlForever").checked = false; $("ctlMin").disabled = false; save();
 });
 function say(text, cls) { CTL.msg = text; CTL.msgCls = cls || ""; CTL.msgAt = Date.now(); const m = $("ctlMsg"); m.textContent = text; m.className = cls || ""; }
 async function post(path, body) {
@@ -456,10 +459,9 @@ async function post(path, body) {
 }
 $("btnStart").addEventListener("click", async () => {
   const c = lastData && lastData.control;
-  const raw = Number($("ctlMin").value);
-  const forever = raw === 0;
-  const minutes = forever ? 0 : Math.min(10080, Math.max(1, Math.round(raw || 0)));
-  if (!forever && !minutes) return say("Nhập thời gian chạy (phút), hoặc 0 để chạy liên tục 24/7.", "bad");
+  const forever = $("ctlForever").checked;
+  const minutes = forever ? 0 : Math.min(10080, Math.max(1, Math.round(Number($("ctlMin").value) || 0)));
+  if (!forever && !minutes) return say("Nhập thời gian chạy (phút), hoặc tick ô chạy liên tục 24/7.", "bad");
   const dry = $("ctlDry").checked;
   const cfg = c && c.config && c.config.markets ? c.config.markets.map((m) => `${m.name} (vị thế tối đa ${m.maxPositionUsd} USD, mỗi mức ${m.levelSizeUsd} USD)`).join("\n  ") : "";
   const what = dry ? "CHẠY THỬ (không gửi giao dịch)" : "CHẠY THẬT trên " + (c && c.config ? c.config.network : "mainnet");
