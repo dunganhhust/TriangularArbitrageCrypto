@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import type { SpawnOptions } from "node:child_process";
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { loadConfig } from "../config.js";
 
@@ -225,6 +225,12 @@ export class BotControl {
       /* none */
     }
     mkdirSync(dirname(this.o.stdoutFile), { recursive: true });
+    try {
+      // The bot's stdout is appended run after run; keep it from growing without limit across weeks of 24/7 runs.
+      if (statSync(this.o.stdoutFile).size > 50_000_000) renameSync(this.o.stdoutFile, `${this.o.stdoutFile}.1`);
+    } catch {
+      /* no file yet */
+    }
     const out = openSync(this.o.stdoutFile, "a");
     // Absolute on purpose: bash's `.` looks a bare name such as "env" up in PATH first and would source /usr/bin/env.
     const envAbs = resolve(this.o.cwd, this.o.envFile);

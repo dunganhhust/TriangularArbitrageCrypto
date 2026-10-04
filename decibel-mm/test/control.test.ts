@@ -134,6 +134,14 @@ describe("start", () => {
     expect(c.status(null)).toMatchObject({ running: true, legacy: true, supervised: false });
   });
 
+  it("moves an oversized stdout file aside instead of letting it grow for ever", async () => {
+    const f = join(dir, "data", "stdout.log");
+    writeFileSync(f, Buffer.alloc(50_000_001, 97));
+    expect((await make().start({ minutes: 5 }, null)).ok).toBe(true);
+    expect(existsSync(`${f}.1`)).toBe(true);
+    expect(statSync(f).size).toBe(0);
+  });
+
   it("can start a dry run", async () => {
     const r = await make().start({ minutes: 5, dryRun: true }, null);
     expect(r.ok).toBe(true);
@@ -255,7 +263,7 @@ describe("HTTP routes", () => {
       stopFile: join(dir, "state", "STOP"),
       priceFeed: null,
       control: control
-        ? { configPath: join(dir, "config.json"), envFile: join(dir, "env"), cwd: dir, tokenFile: join(dir, "state", "dashboard.token"), pidFile: join(dir, "state", "bot.pid"), stdoutFile: join(dir, "data", "stdout.log"), spawnFn: (cmd, args, opts) => { calls.push({ cmd, args, opts: opts as Record<string, unknown> }); return { pid: 4321, unref() {} }; }, isAlive: () => alive, scanBots: () => [], settleMs: 0 }
+        ? { configPath: join(dir, "config.json"), envFile: join(dir, "env"), cwd: dir, tokenFile: join(dir, "state", "dashboard.token"), pidFile: join(dir, "state", "bot.pid"), stdoutFile: join(dir, "data", "stdout.log"), spawnFn: (cmd, args, opts) => { calls.push({ cmd, args, opts: opts as Record<string, unknown> }); return { pid: 4321, unref() {} }; }, isAlive: () => alive, scanBots: () => [], scanSupervisors: () => [], settleMs: 0 }
         : null,
     });
     servers.push(srv);

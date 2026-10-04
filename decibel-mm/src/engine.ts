@@ -180,6 +180,7 @@ export class MarketMaker {
   private dailyPausedDay: string | null = null;
   /** >= 1: widening applied while the day's loss runs ahead of its schedule (see risk.maxPaceMult). */
   private lossPaceMult = 1;
+  private readonly since = new Map<string, number>();
   private lastPaceAt = 0;
   private lastPausedClose = 0;
   private dayFills = 0;
@@ -282,7 +283,8 @@ export class MarketMaker {
     if (acct) {
       this.rollEquityDay(now, acct.equityUsd);
       const floor = this.cfg.risk.minEquityUsd;
-      if (floor > 0 && acct.equityUsd < floor) {
+      // Sustained, not a single reading: one bad reply from the account endpoint must not end an unattended run for good.
+      if (floor > 0 && this.sustained("equity-floor", acct.equityUsd < floor, now)) {
         this.log("error", "HALT", { reason: `equity ${round(acct.equityUsd, 2)} USD below the floor`, minEquityUsd: floor });
         await this.haltAll();
         return;
@@ -357,6 +359,20 @@ export class MarketMaker {
     return mine;
   }
 
+  /**
+   * True when `cond` has held at every call for at least `ms` (two refreshes of the account reading). Used before acting
+   * on equity, which comes from a polled endpoint that can return a bad value once.
+   */
+  private sustained(key: string, cond: boolean, now: number, ms = 12_000): boolean {
+    if (!cond) {
+      this.since.delete(key);
+      return false;
+    }
+    const t = this.since.get(key) ?? now;
+    this.since.set(key, t);
+    return now - t >= ms;
+  }
+
   /** True once the data has been unusable for `engine.watchdogMs`: the runner then ends the process for a clean restart. */
   restartRequested(now: number): boolean {
     const w = this.cfg.engine.watchdogMs;
@@ -417,7 +433,7 @@ export class MarketMaker {
     }
     if (equity === null || this.dayStart === null || this.dayStart.key !== day) return false;
     const lost = this.dayStart.equity - equity;
-    if (lost < limit) return false;
+    if (!this.sustained("daily-loss", lost >= limit, now)) return false;
     this.dailyPausedDay = day;
     this.phase = "paused";
     this.log("error", "daily loss limit reached: closing positions and staying flat until tomorrow (UTC)", { lostUsd: round(lost, 4), maxDailyLossUsd: limit, dayStartEquity: round(this.dayStart.equity, 2), equity: round(equity, 2) });

@@ -321,7 +321,9 @@ describe("engine live snapshot with two markets", () => {
       expect(snap.markets[n].mid).toBeGreaterThan(0);
       expect(snap.markets[n].bid).toBeLessThan(snap.markets[n].ask);
       expect(snap.markets[n].quoting).toBe(true);
-      expect(snap.markets[n].quotes.bids.length).toBeGreaterThan(0);
+      // The snapshot shows what is believed to be resting: fills take levels off it, so under this much flow one side can be
+      // momentarily empty. Something must be quoted, though.
+      expect(snap.markets[n].quotes.bids.length + snap.markets[n].quotes.asks.length).toBeGreaterThan(0);
       expect(snap.markets[n].fuse).toBe("ok");
     }
     expect(snap.equity).toBeGreaterThan(0);

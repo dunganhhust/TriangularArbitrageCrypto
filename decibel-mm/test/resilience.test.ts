@@ -155,14 +155,14 @@ describe("daily loss limit and equity floor", () => {
     expect(h.ourBids()).toBeGreaterThan(0);
     h.ex.pos = 0.01;
     h.ex.equity = 18.5; // down 1.5 USD on the day
-    await h.run(5, 8);
+    await h.run(5, 30); // held for 12 s before it counts
     expect(h.logs.some((l) => l.msg.startsWith("daily loss limit reached"))).toBe(true);
     expect(h.ourBids()).toBe(0);
     expect(h.ex.reduces.length).toBeGreaterThan(0);
     expect(h.ex.pos).toBe(0);
-    expect(snap(h.mm, T0 + 8000).phase).toBe("paused");
+    expect(snap(h.mm, T0 + 30_000).phase).toBe("paused");
     const tx = h.ex.txCount;
-    await h.run(8, 600);
+    await h.run(30, 600);
     expect(h.ex.txCount).toBe(tx); // idle, not even a refresh
     expect(h.mm.isHalted).toBe(false);
 
@@ -224,8 +224,8 @@ describe("daily loss limit and equity floor", () => {
     const a = await build(over, { persist: true });
     await a.run(0, 3);
     a.ex.equity = 18;
-    await a.run(3, 20);
-    expect(snap(a.mm, T0 + 20_000).phase).toBe("paused");
+    await a.run(3, 30);
+    expect(snap(a.mm, T0 + 30_000).phase).toBe("paused");
     // the process restarts: new engine, same state file
     const b = await build(over, { persist: true });
     b.ex.equity = 18;
@@ -234,12 +234,26 @@ describe("daily loss limit and equity floor", () => {
     expect(b.ourBids()).toBe(0);
   });
 
+  it("a single bad equity reading neither halts the bot nor starts the daily pause", async () => {
+    const h = await build({ risk: { minEquityUsd: 15, maxDailyLossUsd: 1 } });
+    await h.run(0, 3);
+    h.ex.equity = 0; // the endpoint returns garbage once...
+    await h.run(3, 4);
+    h.ex.equity = 20; // ...and the next reading is fine
+    await h.run(4, 30);
+    expect(h.mm.isHalted).toBe(false);
+    expect(snap(h.mm, T0 + 30_000).phase).toBe("running");
+    expect(h.ourBids()).toBeGreaterThan(0);
+  });
+
   it("halts when equity falls below the floor, even right after a restart", async () => {
     const h = await build({ risk: { minEquityUsd: 15 } });
     await h.run(0, 3);
     expect(h.mm.isHalted).toBe(false);
     h.ex.equity = 14.9;
-    await h.run(3, 5);
+    await h.run(3, 6);
+    expect(h.mm.isHalted).toBe(false); // one reading is not enough
+    await h.run(6, 20);
     expect(h.mm.isHalted).toBe(true);
     expect(h.logs.some((l) => l.msg === "HALT" && String(l.extra?.reason).includes("below the floor"))).toBe(true);
     expect(h.ourBids()).toBe(0);
