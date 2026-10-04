@@ -1,0 +1,9 @@
+# Restarts the dashboard when it stops answering (a hung process systemd cannot see, because it is still "running").
+# Run once a minute by decibel-dashboard-health.timer. Three tries 5 s apart, so one slow answer never restarts it.
+# Restarting the dashboard does not touch the bot (see KillMode=process in decibel-dashboard.service).
+[Unit]
+Description=Check that the Decibel MM dashboard answers
+
+[Service]
+Type=oneshot
+ExecStart=/bin/sh -c 'for i in 1 2 3; do curl -fsS --max-time 8 http://127.0.0.1:8787/healthz >/dev/null && exit 0; sleep 5; done; echo "dashboard did not answer three times: restarting it"; systemctl restart decibel-dashboard'

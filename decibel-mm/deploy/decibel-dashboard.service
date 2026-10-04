@@ -1,0 +1,37 @@
+# Runs the dashboard (with the Start / End buttons) as a service that restarts itself.
+#
+# Install, as a user with sudo (NOT as `mm`), after stopping any dashboard started by hand:
+#   sudo cp /home/mm/TriangularArbitrageCrypto/decibel-mm/deploy/decibel-dashboard.service /etc/systemd/system/
+#   sudo cp /home/mm/TriangularArbitrageCrypto/decibel-mm/deploy/decibel-dashboard-health.* /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now decibel-dashboard decibel-dashboard-health.timer
+#   journalctl -u decibel-dashboard -n 30 --no-pager
+#
+# Edit User= and the paths if the project lives elsewhere. Do not also run `nohup ... dashboard` by hand: the port
+# would be taken.
+[Unit]
+Description=Decibel MM dashboard (localhost:8787)
+After=network-online.target
+Wants=network-online.target
+# Never give up restarting: the default allows 5 starts in 10 s and then leaves the unit failed for good, which is exactly
+# what happens when the old process still holds the port for a few seconds after a restart.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+User=mm
+WorkingDirectory=/home/mm/TriangularArbitrageCrypto/decibel-mm
+# A login shell so that node is found the same way it is in an interactive session.
+# --max-rss-mb: the dashboard exits (and is started again by Restart=always) if its memory stays above this for 30 s.
+ExecStart=/bin/bash -lc 'exec node --import tsx src/cli.ts dashboard config.json --port 8787 --control --max-rss-mb 700'
+Restart=always
+RestartSec=3
+TimeoutStopSec=15
+
+# IMPORTANT. The trading bot is started by the dashboard as a detached child of this service. With the default
+# KillMode=control-group, stopping or restarting this service would kill the bot too, without cancelling its orders.
+# KillMode=process signals only the dashboard itself and leaves the bot running.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

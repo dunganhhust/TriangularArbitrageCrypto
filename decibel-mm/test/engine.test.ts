@@ -71,3 +71,31 @@ describe("MarketMaker + paper venue", () => {
     expect(mm.isHalted).toBe(true);
   });
 });
+
+describe("gas guards", () => {
+  it("halts and cancels while gas remains when the signer balance drops below the reserve", async () => {
+    const { cfg, ex } = setup({ risk: { minGasBalanceApt: 0.05 } });
+    let balance = 1;
+    (ex as unknown as { getGas: () => unknown }).getGas = () => ({ txCount: 0, gasApt: 0, balanceApt: balance });
+    const specs = await ex.init(["BTC-USD"]);
+    const mm = new MarketMaker(cfg, ex, specs, { log: () => {} });
+    const t0 = Date.UTC(2026, 0, 1);
+    for (let i = 0; i < 20; i++) {
+      ex.advance(t0 + i * 250);
+      await mm.step(t0 + i * 250);
+    }
+    expect(mm.isHalted).toBe(false);
+    expect(ex.getBook("BTC-USD")!.bids.length).toBeGreaterThan(3);
+    balance = 0.01;
+    ex.advance(t0 + 21 * 250);
+    await mm.step(t0 + 21 * 250);
+    expect(mm.isHalted).toBe(true);
+    expect(ex.getBook("BTC-USD")!.bids).toHaveLength(3); // our quotes were pulled
+  });
+
+  it("caps transaction rate at the hard minimum interval", async () => {
+    const { ex } = await run({ engine: { tickMs: 100, minReplaceIntervalMs: 100, hardMinReplaceIntervalMs: 2000 }, paper: { seed: 9, flowPerSec: 6 } }, 600);
+    // 600 ticks * 100ms = 60s of simulated time; at most one tx per 2s per market (+ the first).
+    expect(ex.txCount).toBeLessThanOrEqual(31);
+  });
+});

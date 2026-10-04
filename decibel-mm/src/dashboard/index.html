@@ -1,0 +1,686 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="mm-build" content="__BUILD__">
+<title>Decibel MM Dashboard</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --card: #ffffff; --ink: #1c2330; --muted: #667085; --line: #e3e6ec;
+    --good: #0f9d58; --bad: #d93025; --warn: #e8710a; --info: #1a73e8; --accent: #1a73e8;
+    --good-bg: #e6f4ea; --bad-bg: #fce8e6; --warn-bg: #fef3e0; --info-bg: #e8f0fe;
+    --m0: #1a73e8; --m1: #e8710a; --m2: #0f9d58; --m3: #9334e6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #12151b; --card: #1b2029; --ink: #e8ebf1; --muted: #98a2b3; --line: #2b3240;
+      --good: #4cc38a; --bad: #ff6b60; --warn: #ffa94d; --info: #6aa5ff; --accent: #6aa5ff;
+      --good-bg: #17332a; --bad-bg: #3a1f1d; --warn-bg: #3a2a15; --info-bg: #182b4a;
+      --m0: #6aa5ff; --m1: #ffa94d; --m2: #4cc38a; --m3: #c58af9;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink); font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+  main { max-width: 1320px; margin: 0 auto; padding: 16px; }
+  header { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-bottom: 10px; }
+  h1 { font-size: 18px; margin: 0; }
+  h2 { font-size: 13px; margin: 0 0 8px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+  h3 { font-size: 12px; margin: 14px 0 6px; color: var(--muted); font-weight: 600; }
+  .spacer { flex: 1; }
+  .badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-weight: 600; font-size: 12px; }
+  .b-running { background: var(--good-bg); color: var(--good); }
+  .b-stale, .b-halted { background: var(--bad-bg); color: var(--bad); }
+  .b-stopped, .b-no-data { background: var(--info-bg); color: var(--info); }
+  .b-dry { background: var(--warn-bg); color: var(--warn); }
+  .b-live { background: var(--bad-bg); color: var(--bad); }
+  .muted { color: var(--muted); }
+  .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 5px; background: var(--muted); }
+  .dot.ok { background: var(--good); } .dot.old { background: var(--warn); }
+  .chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); font-variant-numeric: tabular-nums; }
+  .toolbar { position: sticky; top: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; padding: 8px 10px; margin: 0 -10px 12px; background: var(--bg); border-bottom: 1px solid var(--line); }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: var(--card); }
+  .seg button { border: 0; background: transparent; color: var(--ink); padding: 5px 11px; font: inherit; cursor: pointer; border-right: 1px solid var(--line); }
+  .seg button:last-child { border-right: 0; }
+  .seg button.on { background: var(--accent); color: #fff; font-weight: 600; }
+  select, input[type=number] { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); font: inherit; }
+  input[type=number] { width: 78px; }
+  label.inline { display: inline-flex; gap: 6px; align-items: center; color: var(--muted); }
+  .conn { position: sticky; top: 0; z-index: 20; margin: 0 0 10px; padding: 9px 14px; border-radius: 8px; border-left: 4px solid; font-weight: 600; }
+  .conn.bad { background: var(--bad-bg); border-color: var(--bad); }
+  .conn.warn { background: var(--warn-bg); border-color: var(--warn); }
+  .conn.info { background: var(--info-bg); border-color: var(--info); }
+  body.dim main, body.dim #kpis, body.dim #markets { opacity: .55; transition: opacity .3s; }
+  .alerts { display: grid; gap: 6px; margin-bottom: 12px; }
+  .alert { padding: 8px 12px; border-radius: 8px; border-left: 4px solid; }
+  .alert.error { background: var(--bad-bg); border-color: var(--bad); }
+  .alert.warn { background: var(--warn-bg); border-color: var(--warn); }
+  .alert.info { background: var(--info-bg); border-color: var(--info); }
+  .grid { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); margin-bottom: 12px; }
+  .grid.wide { grid-template-columns: repeat(auto-fit, minmax(min(420px, 100%), 1fr)); }
+  .grid.mk { grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-width: 0; overflow-x: auto; }
+  .big { font-size: 26px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .sub { color: var(--muted); font-size: 12px; margin-top: 2px; }
+  .good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+  .bar { position: relative; height: 10px; background: var(--line); border-radius: 6px; margin: 8px 0 4px; overflow: hidden; }
+  .bar > i { position: absolute; left: 0; top: 0; bottom: 0; background: var(--accent); }
+  .bar > b { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--ink); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 5px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; position: sticky; top: 0; background: var(--card); }
+  td.r, th.r { text-align: right; }
+  .scroll { max-height: 340px; overflow: auto; }
+  canvas { width: 100%; height: 190px; display: block; }
+  .legend { display: flex; gap: 12px; flex-wrap: wrap; font-size: 12px; color: var(--muted); margin-top: 4px; }
+  .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; }
+  .tag { padding: 1px 7px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+  .t-maker, .t-info { background: var(--good-bg); color: var(--good); }
+  .t-taker, .t-error { background: var(--bad-bg); color: var(--bad); }
+  .t-warn { background: var(--warn-bg); color: var(--warn); }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .detail { color: var(--muted); word-break: break-all; }
+  .mk h2 { display: flex; justify-content: space-between; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-size: 13px; }
+  .kv span:nth-child(odd) { color: var(--muted); }
+  .kv span:nth-child(even) { text-align: right; font-variant-numeric: tabular-nums; }
+  a { color: var(--accent); }
+  footer { color: var(--muted); font-size: 12px; margin-top: 8px; }
+  .hidden { display: none !important; }
+  #runs tr[data-run] { cursor: pointer; }
+  #runs tr[data-run]:hover td { background: var(--info-bg); }
+  #runs tr.sel td { background: var(--info-bg); font-weight: 600; }
+  .b-finishing { background: var(--warn-bg); color: var(--warn); }
+  .ctl { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 8px; }
+  .btn { border: 0; border-radius: 8px; padding: 8px 16px; font: inherit; font-weight: 700; cursor: pointer; color: #fff; }
+  .btn.go { background: var(--good); } .btn.stop { background: var(--bad); }
+  .btn:disabled { opacity: .35; cursor: not-allowed; }
+  input[type=password] { padding: 4px 8px; border: 1px solid var(--line); border-radius: 6px; background: var(--card); color: var(--ink); font: inherit; width: 230px; }
+  #ctlMsg { font-weight: 600; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Decibel MM</h1>
+    <span id="state" class="badge b-no-data">…</span>
+    <span id="mode" class="badge"></span>
+    <span id="meta" class="muted"></span>
+    <span class="spacer"></span>
+    <span id="aptchip" class="chip" title="Giá APT (đồng gas) theo USD"></span>
+    <span id="clock" class="muted"></span>
+  </header>
+
+  <div class="toolbar">
+    <div class="seg" id="ranges">
+      <button data-r="300">5 phút</button>
+      <button data-r="900">15 phút</button>
+      <button data-r="3600">1 giờ</button>
+      <button data-r="21600">6 giờ</button>
+      <button data-r="86400">24 giờ</button>
+      <button data-r="0">Cả phiên</button>
+      <button data-r="custom">Tùy chọn</button>
+    </div>
+    <span id="customBox" class="hidden"><input id="customMin" type="number" min="1" max="10080" step="1" value="30"> <span class="muted">phút gần nhất</span></span>
+    <label class="inline">Thị trường <select id="market"><option value="">Tất cả</option></select></label>
+    <label class="inline">Phiên <select id="runSel"><option value="">Mới nhất</option></select></label>
+    <label class="inline"><input id="aptAuto" type="checkbox" checked> giá APT tự động</label>
+    <span id="aptManualBox" class="hidden"><input id="aptManual" type="number" step="0.01" min="0.01" value="0.8"></span>
+    <span class="spacer"></span>
+    <span id="livechip" class="muted"></span>
+  </div>
+
+  <div id="control" class="card hidden" style="margin-bottom:12px">
+    <h2>Điều khiển phiên chạy</h2>
+    <div id="ctlStatus"></div>
+    <div class="ctl">
+      <label class="inline">Thời gian chạy <input id="ctlMin" type="number" min="1" max="10080" step="1" value="120"> phút</label>
+      <span class="seg" id="ctlPresets">
+        <button data-m="30">30 phút</button><button data-m="60">1 giờ</button><button data-m="120">2 giờ</button><button data-m="360">6 giờ</button><button data-m="1440">24 giờ</button>
+      </span>
+      <label class="inline"><input id="ctlForever" type="checkbox"> <b>chạy liên tục 24/7</b> (không giờ kết thúc)</label>
+      <label class="inline"><input id="ctlDry" type="checkbox"> chạy thử (không gửi giao dịch)</label>
+      <button id="btnStart" class="btn go" disabled>▶ Bắt đầu</button>
+      <button id="btnStop" class="btn stop" disabled>■ Kết thúc &amp; đóng vị thế</button>
+    </div>
+    <div class="ctl">
+      <label class="inline">Mã điều khiển <input id="ctlToken" type="password" autocomplete="off" placeholder="dán nội dung file state/dashboard.token"></label>
+      <span id="ctlMsg"></span>
+    </div>
+    <div class="sub"><b>Chế độ 24/7 (tick ô "chạy liên tục"):</b> không có giờ kết thúc; nếu bot gặp lỗi hoặc mất dữ liệu thị trường thì được tự khởi động lại (tối đa 8 lần mỗi giờ, nghỉ dài dần), nhưng KHÔNG tự chạy lại sau khi tự dừng vì lỗ/khóa khẩn cấp hay sau khi bấm Kết thúc. Hết giờ, hoặc khi bấm Kết thúc, bot hủy mọi lệnh, đóng toàn bộ vị thế bằng lệnh thị trường (reduce-only, mở rộng giá giới hạn dần qua tối đa 5 lần thử) rồi thoát. Việc đóng vị thế trả phí taker. Dừng khẩn không đóng vị thế: tạo file <span class="mono">state/KILL</span>.</div>
+  </div>
+
+  <div id="conn" class="conn info">Đang kết nối tới dashboard server…</div>
+  <div id="alerts" class="alerts"></div>
+
+  <div class="grid" id="kpis"></div>
+  <div class="grid mk" id="markets"></div>
+
+  <div class="grid wide">
+    <div class="card"><h2>Kinh tế (toàn tài khoản · <span class="rangeLabel"></span>)</h2><table id="econ"></table><div id="econNote" class="sub"></div></div>
+    <div class="card"><h2>Báo giá đang đặt</h2><div id="quotes"></div></div>
+  </div>
+
+  <div class="grid wide">
+    <div class="card"><h2>Vốn (USD)</h2><canvas id="c-equity"></canvas></div>
+    <div class="card"><h2>Vị thế (USD, dương = mua/long)</h2><canvas id="c-pos"></canvas><div class="legend" id="l-pos"></div></div>
+    <div class="card"><h2>Khối lượng khớp tích lũy (USD)</h2><canvas id="c-vol"></canvas><div class="legend" id="l-vol"></div></div>
+    <div class="card"><h2>Số dư APT của ví ký</h2><canvas id="c-apt"></canvas></div>
+  </div>
+
+  <div class="grid wide">
+    <div class="card"><h2 id="h-fills">Lệnh khớp</h2><div class="scroll"><table id="fills"></table></div></div>
+    <div class="card"><h2 id="h-txs">Giao dịch đặt lệnh</h2><div class="scroll"><table id="txs"></table></div></div>
+  </div>
+
+  <div class="card" style="margin-bottom:12px"><h2>Lịch sử phiên chạy (bấm một dòng để xem lại)</h2><div class="scroll"><table id="runs"></table></div></div>
+
+  <div class="card"><h2 id="h-events">Sự kiện (cảnh báo, lỗi, cầu chì, ramp)</h2><div class="scroll"><table id="events"></table></div></div>
+
+  <footer id="foot"></footer>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const isNum = (x) => typeof x === "number" && Number.isFinite(x);
+const fmt = (x, d = 2) => (isNum(x) ? x.toLocaleString("en-US", { minimumFractionDigits: d, maximumFractionDigits: d }) : "–");
+const sgn = (x, d = 2) => (isNum(x) ? (x > 0 ? "+" : "") + fmt(x, d) : "–");
+const cls = (x) => (!isNum(x) || x === 0 ? "" : x > 0 ? "good" : "bad");
+const pad2 = (n) => String(n).padStart(2, "0");
+function tfmt(ms, spanMs) {
+  const d = new Date(ms), hms = `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+  if (spanMs > 20 * 3600e3) return `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)} ${hms.slice(0, 5)}`;
+  return spanMs > 2 * 3600e3 ? hms.slice(0, 5) : hms;
+}
+const hhmmss = (ms) => tfmt(ms, 0);
+function dur(sec) {
+  if (!isNum(sec)) return "–";
+  sec = Math.max(0, sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = Math.floor(sec % 60);
+  return h ? `${h}g ${m}p` : m ? `${m}p ${s}s` : `${s}s`;
+}
+const STATE_TXT = { "no-data": "CHƯA CÓ LOG", running: "ĐANG CHẠY", finishing: "ĐANG ĐÓNG VỊ THẾ", stale: "MẤT TÍN HIỆU", stopped: "ĐÃ DỪNG", halted: "BOT TỰ DỪNG" };
+const MCOL = ["--m0", "--m1", "--m2", "--m3"];
+
+// ---- settings (remembered in this browser only) --------------------------------------------
+const S = { range: "3600", custom: 30, market: "", aptAuto: true, apt: 0.8 };
+try { Object.assign(S, JSON.parse(localStorage.getItem("mm.settings") || "{}")); } catch (e) { /* storage may be blocked */ }
+function save() { try { localStorage.setItem("mm.settings", JSON.stringify(S)); } catch (e) { /* ignore */ } }
+const rangeSec = () => (S.range === "custom" ? Math.max(1, Math.round(S.custom * 60)) : Number(S.range));
+function rangeText() {
+  const s = rangeSec();
+  if (!s) return "cả phiên";
+  return s < 3600 ? `${Math.round(s / 60)} phút qua` : s % 3600 === 0 ? `${s / 3600} giờ qua` : `${Math.round(s / 60)} phút qua`;
+}
+function syncControls() {
+  for (const b of $("ranges").children) b.classList.toggle("on", b.dataset.r === String(S.range));
+  $("customBox").classList.toggle("hidden", S.range !== "custom");
+  $("customMin").value = S.custom;
+  $("aptAuto").checked = S.aptAuto;
+  $("aptManualBox").classList.toggle("hidden", S.aptAuto);
+  $("aptManual").value = S.apt;
+  for (const e of document.querySelectorAll(".rangeLabel")) e.textContent = rangeText();
+}
+$("ranges").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button");
+  if (!b) return;
+  S.range = b.dataset.r; save(); syncControls(); refresh();
+});
+$("customMin").addEventListener("change", () => { S.custom = Math.min(10080, Math.max(1, Number($("customMin").value) || 30)); save(); syncControls(); refresh(); });
+$("market").addEventListener("change", () => { S.market = $("market").value; save(); refresh(); });
+// Which run is open. Deliberately not remembered across reloads: reopening the page always shows the newest run.
+let RUN = "";
+$("runSel").addEventListener("change", () => { RUN = $("runSel").value; refresh(); });
+$("runs").addEventListener("click", (ev) => {
+  const tr = ev.target.closest("tr[data-run]");
+  if (!tr) return;
+  RUN = tr.dataset.run === String(lastData && lastData.runs[0] && lastData.runs[0].id) ? "" : tr.dataset.run;
+  refresh();
+});
+$("aptAuto").addEventListener("change", () => { S.aptAuto = $("aptAuto").checked; save(); syncControls(); refresh(); });
+$("aptManual").addEventListener("change", () => { S.apt = Number($("aptManual").value) || 0.8; save(); refresh(); });
+
+// ---- rendering helpers ---------------------------------------------------------------------
+const last = {};
+function setHTML(id, html) {
+  if (last[id] === html) return; // leave the DOM (and any text selection) alone when nothing changed
+  last[id] = html;
+  $(id).innerHTML = html;
+}
+function card(title, big, bigCls, sub) {
+  return `<div class="card"><h2>${esc(title)}</h2><div class="big ${bigCls || ""}">${big}</div><div class="sub">${sub || ""}</div></div>`;
+}
+
+let lastData = null;
+function render(d) {
+  lastData = d;
+  const r = d.run, L = d.latest || {}, e = d.econ, lim = d.config.limits || {};
+  $("state").className = "badge b-" + r.state;
+  $("state").textContent = STATE_TXT[r.state] || r.state;
+  $("state").title = r.detail;
+  $("mode").className = "badge " + (r.dryRun ? "b-dry" : "b-live");
+  $("mode").textContent = r.state === "no-data" ? "" : r.dryRun ? "THỬ (không gửi tx)" : "THẬT";
+  const left = isNum(r.remainingSec) ? ` · còn ${dur(r.remainingSec)} (hết giờ lúc ${hhmmss(r.endsAt)})` : "";
+  $("meta").textContent = r.state === "no-data" ? r.detail : `${r.network || ""} · ${(r.markets || []).join(", ")} · chạy ${dur(r.uptimeSec)}${left} · tín hiệu cuối ${dur(r.ageSec)} trước`;
+  $("meta").title = r.detail;
+  $("clock").textContent = new Date(d.generatedAt).toLocaleTimeString("vi-VN", { hour12: false });
+  $("livechip").innerHTML = r.liveSeen
+    ? '<span class="dot ok"></span>trực tiếp · cập nhật mỗi giây'
+    : '<span class="dot old"></span>theo log (30 giây/lần) · khởi động lại bot bản mới để có dữ liệu mỗi giây';
+
+  // APT price
+  const p = d.aptPrice;
+  if (!S.aptAuto) $("aptchip").innerHTML = `<span class="dot"></span>APT $${fmt(S.apt, 4)} <span class="muted">thủ công</span>`;
+  else if (p) $("aptchip").innerHTML = `<span class="dot ${p.stale ? "old" : "ok"}"></span>APT $${fmt(p.usd, 4)} <span class="muted">${esc(p.source)} · ${p.ageSec}s</span>`;
+  else $("aptchip").innerHTML = `<span class="dot old"></span>APT $${fmt(e.aptUsd, 4)} <span class="muted">không lấy được giá, dùng mặc định</span>`;
+
+  // market filter options
+  const sel = $("market"), want = ["", ...(r.markets || [])];
+  if (JSON.stringify([...sel.options].map((o) => o.value)) !== JSON.stringify(want)) {
+    sel.innerHTML = want.map((m) => `<option value="${esc(m)}">${m ? esc(m) : "Tất cả"}</option>`).join("");
+  }
+  sel.value = S.market;
+
+  // Run history: selector and table
+  const OUT = {
+    running: ["Đang chạy", "good"], closed: ["", "good"], residual: ["CÒN vị thế chưa đóng", "bad"],
+    halted: ["Bot tự dừng", "bad"], restarted: ["Lỗi, bot đã tự khởi động lại", "warn"], signal: ["Dừng bằng tín hiệu (giữ vị thế)", "warn"], unknown: ["Không có dòng kết thúc", "muted"],
+  };
+  const outText = (x) => {
+    if (x.outcome === "closed") return (x.reason === "deadline" ? "Hết giờ" : x.reason === "stop" ? "Bấm Kết thúc" : "Kết thúc") + " · đã đóng vị thế";
+    if (x.outcome === "residual") return "CÒN vị thế: " + Object.entries(x.residual).map(([k, v]) => `${k} ${v}`).join(", ");
+    if (x.outcome === "halted") return "Bot tự dừng" + (x.reason ? ": " + x.reason : "");
+    return OUT[x.outcome][0];
+  };
+  const dm = (ms) => { const t = new Date(ms); return `${pad2(t.getDate())}/${pad2(t.getMonth() + 1)} ${pad2(t.getHours())}:${pad2(t.getMinutes())}`; };
+  const runs = d.runs || [];
+  const rsel = $("runSel"), want2 = ["", ...runs.map((x) => String(x.id))];
+  if (JSON.stringify([...rsel.options].map((o) => o.value)) !== JSON.stringify(want2) || rsel.dataset.n !== String(runs.length)) {
+    rsel.innerHTML = '<option value="">Mới nhất</option>' + runs.map((x, i) => `<option value="${x.id}">${i === 0 ? "● " : ""}${dm(x.startedAt)} · ${x.dryRun ? "thử" : "thật"} · ${dur((x.endedAt - x.startedAt) / 1000)} · ${esc(x.markets.join("+"))}</option>`).join("");
+    rsel.dataset.n = String(runs.length);
+  }
+  rsel.value = RUN;
+  if (RUN && !runs.some((x) => String(x.id) === RUN)) RUN = "";
+  setHTML("runs", '<tr><th>Bắt đầu</th><th>Thời lượng</th><th>Chế độ</th><th>Thị trường</th><th class="r">Lệnh khớp</th><th class="r">Khối lượng</th><th class="r">Δ vốn</th><th class="r">Gas (APT)</th><th>Kết quả</th></tr>' +
+    (runs.map((x, i) => `<tr data-run="${x.id}" class="${String(r.id) === String(x.id) ? "sel" : ""}"><td>${dm(x.startedAt)}${i === 0 ? ' <span class="tag t-info">mới nhất</span>' : ""}${isNum(x.attempt) && x.attempt > 1 ? ` <span class="muted">lần ${x.attempt}</span>` : ""}</td><td>${dur((x.endedAt - x.startedAt) / 1000)}${x.plannedMinutes ? ` <span class="muted">/ ${x.plannedMinutes}p</span>` : ""}</td><td>${x.dryRun ? "thử" : "thật"}</td><td>${esc(x.markets.join(", "))}</td><td class="r">${x.fills}</td><td class="r">${fmt(x.volumeUsd)}</td><td class="r ${cls(x.equityDelta)}">${sgn(x.equityDelta, 3)}</td><td class="r">${fmt(x.gasApt, 5)}</td><td class="${OUT[x.outcome][1]}">${esc(outText(x))}</td></tr>`).join("") ||
+      '<tr><td colspan="9" class="muted">Chưa có phiên nào trong log.</td></tr>'));
+
+  const banner = r.isLatest === false ? `<div class="alert info">Đang xem lại phiên cũ bắt đầu lúc ${dm(r.startedAt)}. Số liệu bên dưới thuộc phiên đó, không phải bot hiện tại. <a href="#" id="backLatest">Quay về phiên mới nhất</a></div>` : "";
+  setHTML("alerts", banner + d.alerts.map((a) => `<div class="alert ${a.level}">${esc(a.text)}</div>`).join(""));
+  const bl = $("backLatest");
+  if (bl) bl.onclick = (ev) => { ev.preventDefault(); RUN = ""; refresh(); };
+
+  // KPI cards (account-wide)
+  const startEq = isNum(L.startEquity) ? L.startEquity : e.equityStart;
+  const runDelta = isNum(L.equity) && isNum(startEq) ? L.equity - startEq : null;
+  const ddLim = isNum(lim.maxDrawdownUsd) ? lim.maxDrawdownUsd : null;
+  const ddUsed = isNum(runDelta) && runDelta < 0 && ddLim ? Math.min(1, -runDelta / ddLim) : 0;
+  const share = e.volumeUsd > 0 ? d.markets.reduce((a, m) => a + m.makerVolumeUsd, 0) / Math.max(1e-9, d.markets.reduce((a, m) => a + m.volumeUsd, 0)) : null;
+  const k = [];
+  k.push(card("Vốn (equity)", isNum(e.equityNow) ? fmt(e.equityNow) + " USD" : "–", "",
+    `Δ ${rangeText()}: <span class="${cls(e.equityDelta)}">${sgn(e.equityDelta, 3)} USD</span><br>Δ từ đầu phiên: <span class="${cls(runDelta)}">${sgn(runDelta, 3)}</span> (đầu ${fmt(startEq)})` +
+    (ddLim ? `<div class="bar"><i style="width:${(ddUsed * 100).toFixed(0)}%;background:var(--bad)"></i></div>ngưỡng dừng lỗ ${ddLim} USD` : "")));
+  k.push(card("Khối lượng khớp", fmt(e.volumeUsd) + " USD", "",
+    `${rangeText()} · maker ${share === null ? "–" : (share * 100).toFixed(1) + "%"} khối lượng<br>ngày UTC: ${fmt(L.dayVolumeUsd, 0)} USD`));
+  const ratio = isNum(L.cycleMakerRatio) ? L.cycleMakerRatio : null, need = isNum(lim.minMakerRatio) ? lim.minMakerRatio : 0.8;
+  k.push(`<div class="card"><h2>Rebate chu kỳ ${esc(L.cycle || "")}</h2>
+    <div class="big ${ratio === null ? "" : ratio >= need ? "good" : "bad"}">${ratio === null ? "chưa có lệnh khớp" : (ratio * 100).toFixed(1) + "% maker"}</div>
+    <div class="bar"><i style="width:${ratio === null ? 0 : (ratio * 100).toFixed(0)}%"></i><b style="left:${need * 100}%"></b></div>
+    <div class="sub">cần ≥ ${(need * 100).toFixed(0)}% · ${L.rebateEligible === false ? '<span class="bad">KHÔNG đủ điều kiện</span>' : "đủ điều kiện"} · rebate dự kiến ${fmt(L.projectedRebateUsd, 4)} USD</div></div>`);
+  k.push(card("Hiệu quả (EWMA)", sgn(L.pnlBps, 2) + " bps", cls(L.pnlBps), `spreadMult ${fmt(L.spreadMult, 2)} · PnL gộp ${rangeText()}: ${sgn(e.grossPnlBps, 2)} bps`));
+  const allFills = d.markets.reduce((a, m) => a + m.fills, 0), mk = d.markets.reduce((a, m) => a + m.maker, 0), tk = d.markets.reduce((a, m) => a + m.taker, 0);
+  k.push(card("Khớp lệnh", `${mk} maker / ${tk} taker`, tk ? "warn" : "", `${allFills} lệnh · ${rangeText()} · phí ${fmt(e.feesUsd, 4)} USD`));
+  k.push(card("Gas (APT)", isNum(e.gasApt) ? fmt(e.gasApt, 5) : "–", "",
+    `${rangeText()} · ${isNum(e.txCount) ? e.txCount : "–"} tx · ≈ ${fmt(e.gasUsd, 4)} USD<br>cả phiên ${fmt(e.gasAptRun, 5)} APT · ví ký ${fmt(e.aptBalance, 4)} APT` +
+    `${isNum(e.aptRunwayHours) ? "<br>đủ ~" + fmt(e.aptRunwayHours, 0) + " giờ" : ""}`));
+  const reasons = L.replaces ? Object.entries(L.replaces).filter(([, n]) => n > 0).map(([a, n]) => `${({ initial: "đầu", threat: "bị đe dọa", drift: "giá chạy", fill: "sau khớp", stale: "định kỳ" })[a] || a} ${n}`).join(" · ") : "";
+  k.push(card("Đặt lại lệnh & chi phí", isNum(L.replacesLastHour) ? `${L.replacesLastHour} lần / giờ` : "–", "",
+    `gas ${isNum(L.gasBps) ? fmt(L.gasBps, 2) + " bps" : "–"} · ${isNum(L.gasUsd) ? fmt(L.gasUsd, 4) : "–"} USD hôm nay${isNum(L.economy) && L.economy > 1.05 ? ` · <span class="warn">tiết kiệm gas x${L.economy}</span>` : ""}${isNum(L.lossPace) && L.lossPace > 1.05 ? ` · <span class="warn">nới giá x${L.lossPace} (lỗ trong ngày đang nhanh hơn nhịp)</span>` : ""}<br>` +
+    `${reasons || "chưa có"}<br>taker: ${isNum(L.takerReduce) ? L.takerReduce : "–"} do đóng vị thế · <span class="${L.takerCross ? "warn" : ""}">${isNum(L.takerCross) ? L.takerCross : "–"} do giá chạy tới</span>${L.guardTicks ? ` (cách xa ${L.guardTicks} tick)` : ""}` +
+    `${L.gasPerTxApt && (L.gasPerTxApt.encryptedTx || L.gasPerTxApt.plainTx) ? `<br>gas/tx: mã hóa ${isNum(L.gasPerTxApt.encrypted) ? fmt(L.gasPerTxApt.encrypted, 6) : "–"} APT (${L.gasPerTxApt.encryptedTx} tx) · thường ${isNum(L.gasPerTxApt.plain) ? fmt(L.gasPerTxApt.plain, 6) : "–"} APT (${L.gasPerTxApt.plainTx} tx)` : ""}` +
+    `${isNum(L.gasRunwayDays) ? `<br>APT đủ ~${fmt(L.gasRunwayDays, 1)} ngày` : ""}`));
+  k.push(card("An toàn", `ramp ${isNum(L.rampStage) ? L.rampStage : "–"} · ${isNum(L.sizeMult) ? "x" + L.sizeMult : ""}`, "",
+    `cầu chì ngắt ${d.counters.fuseTrips} lần · tạm dừng ${d.counters.pauses} · cảnh báo ${d.counters.warn} · lỗi ${d.counters.error} (${rangeText()})`));
+  setHTML("kpis", k.join(""));
+
+  // Market cards
+  const names = r.markets || [];
+  setHTML("markets", d.markets.map((m) => {
+    const col = `var(${MCOL[Math.max(0, names.indexOf(m.name)) % MCOL.length]})`;
+    const pct = isNum(m.capUsd) && m.capUsd > 0 && isNum(m.positionUsd) ? Math.min(1, Math.abs(m.positionUsd) / m.capUsd) : null;
+    const alive = r.state === "running" || r.state === "finishing";
+    const fz = !alive ? "bot đã dừng" : m.fuse === "tripped" ? `<span class="warn">cầu chì ngắt${m.fuseUntil ? " · còn " + Math.max(0, Math.ceil((m.fuseUntil - d.generatedAt) / 1000)) + "s" : ""}</span>` : m.fuse === "recovering" ? "đang hồi phục (báo giá rộng hơn)" : "cầu chì bình thường";
+    const st = !alive ? "không báo giá" : m.paused ? `<span class="warn">tạm dừng: ${esc(m.paused)}</span>` : m.quoting ? "đang báo giá" : m.quoting === false ? "chưa báo giá" : "–";
+    return `<div class="card mk"><h2><span style="color:${col}">● ${esc(m.name)}</span><span class="muted">${st}</span></h2>
+      <div class="big">${fmt(m.mid, m.mid > 1000 ? 1 : 3)}</div>
+      <div class="sub">mua ${fmt(m.bid, m.mid > 1000 ? 1 : 3)} · bán ${fmt(m.ask, m.mid > 1000 ? 1 : 3)} · chênh ${fmt(m.spreadBps, 2)} bps · ${fz}</div>
+      <div class="kv" style="margin-top:8px">
+        <span>Vị thế</span><span>${fmt(m.position, 5)} (${sgn(m.positionUsd)} USD)</span>
+        <span>Giới hạn đang áp dụng</span><span>${fmt(m.capUsd, 1)} USD${pct === null ? "" : " · " + (pct * 100).toFixed(0) + "%"}</span>
+        <span>Khối lượng · ${rangeText()}</span><span>${fmt(m.volumeUsd)} USD · ${m.fills} lệnh</span>
+        <span>Maker / taker</span><span>${m.maker} / <span class="${m.taker ? "warn" : ""}">${m.taker}</span></span>
+        <span>Phí trả</span><span>${fmt(m.feesUsd, 4)} USD</span>
+      </div>${pct === null ? "" : `<div class="bar"><i style="width:${(pct * 100).toFixed(0)}%;background:${col}"></i></div>`}</div>`;
+  }).join(""));
+
+  // Economics
+  const row = (a, b, c) => `<tr><td>${a}</td><td class="r">${b}</td><td class="r muted">${c || ""}</td></tr>`;
+  setHTML("econ",
+    row("Khối lượng khớp", fmt(e.volumeUsd) + " USD") +
+    row("Phí đã trả", fmt(e.feesUsd, 4) + " USD", isNum(e.feeBps) ? fmt(e.feeBps, 2) + " bps" : "") +
+    row("PnL giao dịch gộp (trước phí)", `<span class="${cls(e.grossPnlUsd)}">${sgn(e.grossPnlUsd, 4)} USD</span>`, isNum(e.grossPnlBps) ? sgn(e.grossPnlBps, 2) + " bps" : "") +
+    row("Δ vốn (sau phí, gồm lãi/lỗ chưa chốt)", `<span class="${cls(e.equityDelta)}">${sgn(e.equityDelta, 4)} USD</span>`) +
+    row("Rebate dự kiến (chưa nhận)", sgn(e.rebateUsd, 4) + " USD", fmt(e.rebateBps, 1) + " bps × khối lượng maker") +
+    row("Gas", "−" + fmt(e.gasUsd, 4) + " USD", `${fmt(e.gasApt, 5)} APT × ${fmt(e.aptUsd, 4)} · ${isNum(e.gasBps) ? fmt(e.gasBps, 1) + " bps" : "–"}`) +
+    `<tr><td><b>Ròng ước tính</b></td><td class="r"><b class="${cls(e.netUsd)}">${sgn(e.netUsd, 4)} USD</b></td><td></td></tr>`);
+  const feeNet = isNum(e.feeBps) ? e.feeBps - e.rebateBps : null;
+  setHTML("econNote", isNum(feeNet) && isNum(e.gasBps)
+    ? `Hòa vốn cần PnL gộp ≥ phí ròng ${fmt(feeNet, 2)} bps + gas ${fmt(e.gasBps, 1)} bps = <b>${fmt(feeNet + e.gasBps, 1)} bps</b>; hiện ${sgn(e.grossPnlBps, 2)} bps. Rebate chỉ về sau chu kỳ nếu giữ ≥ ${(need * 100).toFixed(0)}% maker.`
+    : "Cần có lệnh khớp trong khoảng này để tính hòa vốn. Phiên ngắn rất nhiễu.");
+
+  // Quotes per market
+  setHTML("quotes", d.markets.filter((m) => m.quotes).map((m) => {
+    const q = m.quotes, dec = m.mid > 1000 ? 1 : 3;
+    const asks = [...q.asks].reverse().map((x) => `<tr><td class="bad">bán</td><td class="r">${fmt(x[0], dec)}</td><td class="r">${fmt(x[1], 5)}</td><td class="r muted">${fmt(x[0] * x[1])} USD</td></tr>`).join("");
+    const bids = q.bids.map((x) => `<tr><td class="good">mua</td><td class="r">${fmt(x[0], dec)}</td><td class="r">${fmt(x[1], 5)}</td><td class="r muted">${fmt(x[0] * x[1])} USD</td></tr>`).join("");
+    const mid = q.bids[0] && q.asks[0] ? (q.bids[0][0] + q.asks[0][0]) / 2 : null;
+    const spr = mid ? ((q.asks[0][0] - q.bids[0][0]) / mid) * 1e4 : null;
+    const age = r.liveSeen ? "trực tiếp" : `lúc ${hhmmss(m.quotesAt)}`;
+    return `<div class="sub"><b>${esc(m.name)}</b> · ${age} · khoảng cách bid/ask của bot ${fmt(spr, 2)} bps</div>
+      <table><tr><th></th><th class="r">Giá</th><th class="r">Khối lượng</th><th class="r">Giá trị</th></tr>${asks}${bids}</table>`;
+  }).join("") || '<div class="muted">Chưa có báo giá nào.</div>');
+
+  // Tables, filtered by window and market on the server
+  const win = rangeText() + (S.market ? ` · ${S.market}` : "");
+  $("h-fills").textContent = `Lệnh khớp · ${d.fills.total} (${win})`;
+  setHTML("fills", '<tr><th>Giờ</th><th>Thị trường</th><th>Phía</th><th class="r">Giá</th><th class="r">KL</th><th class="r">USD</th><th>Loại</th><th class="r">Phí</th></tr>' +
+    (d.fills.recent.map((f) => `<tr><td>${tfmt(f.t, d.window.to - d.window.from)}</td><td>${esc(f.market)}</td><td class="${f.side === "buy" ? "good" : "bad"}">${f.side === "buy" ? "mua" : "bán"}</td><td class="r">${fmt(f.px)}</td><td class="r">${fmt(f.sz, 5)}</td><td class="r">${fmt(f.usd)}</td><td><span class="tag ${f.maker ? "t-maker" : "t-taker"}">${f.maker ? "maker" : "taker"}</span></td><td class="r">${fmt(f.fee, 4)}</td></tr>`).join("") ||
+    '<tr><td colspan="8" class="muted">Không có lệnh khớp trong khoảng này.</td></tr>'));
+
+  const net = r.network === "testnet" ? "testnet" : "mainnet";
+  $("h-txs").textContent = `Giao dịch đặt lệnh · ${d.ladders.total} (${win})`;
+  setHTML("txs", '<tr><th>Giờ</th><th>Thị trường</th><th>Chế độ</th><th class="r">Gas</th><th>Tx</th></tr>' +
+    (d.ladders.recent.map((t) => `<tr><td>${tfmt(t.t, d.window.to - d.window.from)}</td><td>${esc(t.market)}</td><td>${t.dry ? "thử" : "thật" + (t.path ? " (" + esc(t.path) + ")" : "")}</td><td class="r">${isNum(t.gasUsed) ? t.gasUsed : "–"}</td><td class="mono">${t.hash ? `<a target="_blank" rel="noopener noreferrer" href="https://explorer.aptoslabs.com/txn/${encodeURIComponent(t.hash)}?network=${net}">${esc(t.hash.slice(0, 10))}…</a>` : "–"}</td></tr>`).join("") ||
+    '<tr><td colspan="5" class="muted">Không có giao dịch trong khoảng này.</td></tr>') +
+    `<tr><td colspan="5" class="sub">${d.ladders.placed} đã gửi · ${d.ladders.dry} thử · ${d.ladders.failed} lỗi${isNum(d.ladders.perHour) ? " · " + fmt(d.ladders.perHour, 1) + " lần/giờ" : ""}</td></tr>`);
+
+  $("h-events").textContent = `Sự kiện · ${d.events.total} (${win})`;
+  setHTML("events", '<tr><th>Giờ</th><th>Mức</th><th>Nội dung</th></tr>' +
+    (d.events.rows.map((v) => `<tr><td>${tfmt(v.t, d.window.to - d.window.from)}</td><td><span class="tag t-${esc(v.level)}">${esc(v.level)}</span></td><td>${esc(v.msg)} <span class="detail mono">${esc(v.detail)}</span></td></tr>`).join("") ||
+    '<tr><td colspan="3" class="muted">Không có sự kiện đáng chú ý trong khoảng này.</td></tr>'));
+
+  const w = d.window;
+  const sv = d.server ? ` · dashboard server pid ${d.server.pid}, chạy ${dur((d.generatedAt - d.server.startedAt) / 1000)}, RAM ${d.server.rssMb} MB, bản ${esc(d.build || "?")}` : "";
+  setHTML("foot", `${esc(`${d.logLines} dòng log đã đọc · khoảng ${tfmt(w.from, w.to - w.from)} → ${tfmt(w.to, w.to - w.from)} · làm mới mỗi giây · dừng khẩn không đóng vị thế: tạo file state/KILL`)}${sv}`);
+
+  const span = Math.max(1, w.to - w.from);
+  const eq = [{ xs: d.series.t, ys: d.series.equity, color: "--m0", label: "Vốn" }];
+  drawChart("c-equity", eq, { base: isNum(e.equityStart) ? e.equityStart : null, dec: 3, span });
+  const pos = names.filter((n) => d.series.positionUsdByMarket[n]).map((n, i) => ({ xs: d.series.t, ys: d.series.positionUsdByMarket[n], color: MCOL[names.indexOf(n) % MCOL.length], label: n }));
+  drawChart("c-pos", pos, { base: 0, dec: 2, span });
+  setHTML("l-pos", legend(pos));
+  const vol = names.filter((n) => d.volumeByMarket[n]).map((n) => ({ xs: d.volumeByMarket[n].t, ys: d.volumeByMarket[n].cumUsd, color: MCOL[names.indexOf(n) % MCOL.length], label: n, step: true }));
+  if (vol.length !== 1) vol.push({ xs: d.volumeSeries.t, ys: d.volumeSeries.cumUsd, color: "--ink-line", label: "Tổng", step: true });
+  drawChart("c-vol", vol, { dec: 0, min0: true, span });
+  setHTML("l-vol", legend(vol));
+  const lm = isNum(lim.minGasBalanceApt) ? lim.minGasBalanceApt : null;
+  drawChart("c-apt", [{ xs: d.series.t, ys: d.series.aptBalance, color: "--info", label: "APT" }], { base: lm, dec: 4, span });
+  renderControl(d);
+}
+
+// ---- Start / End controls (only when the dashboard was started with --control) -----------------
+const CTL = { busy: false, msg: "", msgCls: "" };
+let TOKEN = "";
+try { TOKEN = localStorage.getItem("mm.token") || ""; } catch (e) { /* ignore */ }
+$("ctlToken").value = TOKEN;
+$("ctlMin").value = S.ctlMin || 120;
+$("ctlDry").checked = !!S.ctlDry;
+$("ctlToken").addEventListener("input", () => {
+  TOKEN = $("ctlToken").value.trim();
+  try { localStorage.setItem("mm.token", TOKEN); } catch (e) { /* ignore */ }
+  if (lastData) renderControl(lastData);
+});
+$("ctlMin").addEventListener("change", () => { S.ctlMin = Math.min(10080, Math.max(1, Math.round(Number($("ctlMin").value) || 120))); $("ctlMin").value = S.ctlMin; save(); });
+// 24/7 is never remembered between page loads: it has to be ticked on purpose each time.
+$("ctlForever").addEventListener("change", () => { $("ctlMin").disabled = $("ctlForever").checked; });
+$("ctlDry").addEventListener("change", () => { S.ctlDry = $("ctlDry").checked; save(); });
+$("ctlPresets").addEventListener("click", (ev) => {
+  const b = ev.target.closest("button");
+  if (!b) return;
+  S.ctlMin = Number(b.dataset.m); $("ctlMin").value = S.ctlMin; $("ctlForever").checked = false; $("ctlMin").disabled = false; save();
+});
+function say(text, cls) { CTL.msg = text; CTL.msgCls = cls || ""; CTL.msgAt = Date.now(); const m = $("ctlMsg"); m.textContent = text; m.className = cls || ""; }
+async function post(path, body) {
+  CTL.busy = true; if (lastData) renderControl(lastData);
+  const ac = new AbortController();
+  const deadline = setTimeout(() => ac.abort(), 30000);
+  try {
+    const res = await fetch(path, { method: "POST", headers: { "content-type": "application/json", "x-mm-token": TOKEN }, body: JSON.stringify(body || {}), signal: ac.signal });
+    const j = await res.json().catch(() => ({ ok: false, error: "Phản hồi không hợp lệ (HTTP " + res.status + ")" }));
+    return j;
+  } catch (err) {
+    return { ok: false, error: err && err.name === "AbortError" ? "Dashboard server không trả lời trong 30 giây. Kiểm tra bot rồi thử lại (lệnh có thể đã được nhận)." : "Không gọi được dashboard server: " + (err.message || err) };
+  } finally {
+    clearTimeout(deadline);
+    CTL.busy = false;
+    refresh();
+  }
+}
+$("btnStart").addEventListener("click", async () => {
+  const c = lastData && lastData.control;
+  const forever = $("ctlForever").checked;
+  const minutes = forever ? 0 : Math.min(10080, Math.max(1, Math.round(Number($("ctlMin").value) || 0)));
+  if (!forever && !minutes) return say("Nhập thời gian chạy (phút), hoặc tick ô chạy liên tục 24/7.", "bad");
+  const dry = $("ctlDry").checked;
+  const cfg = c && c.config && c.config.markets ? c.config.markets.map((m) => `${m.name} (vị thế tối đa ${m.maxPositionUsd} USD, mỗi mức ${m.levelSizeUsd} USD)`).join("\n  ") : "";
+  const what = dry ? "CHẠY THỬ (không gửi giao dịch)" : "CHẠY THẬT trên " + (c && c.config ? c.config.network : "mainnet");
+  const ok = confirm(forever
+    ? `${what} LIÊN TỤC 24/7, không có giờ kết thúc.\n\n  ${cfg}\n\nBot tự khởi động lại khi gặp lỗi; chỉ dừng khi bạn bấm Kết thúc (hủy lệnh, đóng vị thế), khi chạm giới hạn lỗ, hoặc khi cần người xử lý. Tiếp tục?`
+    : `${what} trong ${minutes} phút.\n\n  ${cfg}\n\nHết giờ bot sẽ hủy lệnh và đóng toàn bộ vị thế. Tiếp tục?`);
+  if (!ok) return;
+  say("Đang khởi động bot…", "muted");
+  const j = await post("/api/control/start", forever ? { forever: true, dryRun: dry } : { minutes, dryRun: dry });
+  say(j.ok ? `Đã khởi động (PID ${j.pid}). Chờ bot ghi log đầu tiên…` : j.error + (j.detail ? "\n" + j.detail : ""), j.ok ? "good" : "bad");
+});
+$("btnStop").addEventListener("click", async () => {
+  if (!confirm("Kết thúc phiên: bot sẽ hủy mọi lệnh và ĐÓNG TOÀN BỘ VỊ THẾ bằng lệnh thị trường (trả phí taker), rồi thoát.\n\nTiếp tục?")) return;
+  say("Đang gửi yêu cầu kết thúc…", "muted");
+  const j = await post("/api/control/stop", {});
+  say(j.ok ? "Đã yêu cầu kết thúc. Bot đang đóng vị thế…" : j.error, j.ok ? "good" : "bad");
+});
+function renderControl(d) {
+  const c = d.control || { enabled: false };
+  $("control").classList.toggle("hidden", !c.enabled);
+  if (!c.enabled) return;
+  const r = d.run, cf = c.config || {};
+  let st;
+  if (c.running) {
+    const who = c.startedBy === "dashboard" ? "bắt đầu từ dashboard" : "bắt đầu bên ngoài dashboard";
+    const sv = d.supervisor && d.supervisor.alive ? d.supervisor : null;
+    const svTxt = !c.supervised ? "" : sv
+      ? ` · <b>chế độ 24/7</b>: ${sv.state === "backoff" ? `<span class="warn">đang chờ khởi động lại lúc ${hhmmss(sv.nextStartAt)}</span>` : sv.state === "running" ? "giám sát đang chạy" : esc(sv.state)}, đã khởi động lại ${sv.restarts} lần${sv.lastExit && sv.lastExit.code !== 0 ? ` (lần thoát gần nhất: ${sv.lastExit.code === null ? esc(sv.lastExit.signal) : "mã " + sv.lastExit.code} lúc ${hhmmss(sv.lastExit.at)})` : ""}`
+      : " · chế độ 24/7";
+    st = `<b class="good">Bot đang chạy</b> (PID ${c.pid ?? "?"}, ${who})${svTxt}` +
+      (isNum(r.remainingSec) ? ` · còn <b>${dur(r.remainingSec)}</b>, hết giờ lúc ${hhmmss(r.endsAt)}` : " · không đặt giờ kết thúc") +
+      (c.stopRequested || r.state === "finishing" ? ' · <b class="warn">đang kết thúc và đóng vị thế</b>' : "");
+  } else {
+    const lr = (d.runs || [])[0];
+    const note = !lr ? "" : lr.outcome === "closed" ? " Phiên gần nhất đã đóng toàn bộ vị thế." : lr.outcome === "residual" ? ' <b class="bad">Phiên gần nhất còn vị thế chưa đóng.</b>' : lr.outcome === "signal" ? " Phiên gần nhất bị dừng bằng tín hiệu: vị thế giữ nguyên, kiểm tra Positions." : lr.outcome === "halted" ? ' <b class="bad">Phiên gần nhất tự dừng.</b>' : "";
+    st = "<b>Bot không chạy.</b>" + note;
+  }
+  const mk = cf.markets ? "Sẽ chạy: " + cf.network + " · " + cf.markets.map((m) => `${esc(m.name)} (tối đa ${m.maxPositionUsd} USD, mỗi mức ${m.levelSizeUsd})`).join(" · ") + ` · làm mới ${Math.round((cf.minReplaceIntervalMs || 0) / 60000 * 10) / 10} phút` : cf.error ? `<span class="bad">Cấu hình lỗi: ${esc(cf.error)}</span>` : "";
+  const legacy = c.legacy ? `<br><span class="bad">Có bot đang chạy (PID ${c.pid ?? "?"}) nhưng không ghi live.json: đây là bản cũ, nút Kết thúc không có tác dụng với nó. Dừng bằng <span class="mono">kill -TERM ${c.pid ?? "PID"}</span> (hủy lệnh, giữ vị thế) hoặc để nó chạy hết giờ, rồi chạy phiên mới từ dashboard.</span>` : "";
+  const warn = legacy + (c.killFile ? '<br><span class="bad">File state/KILL đang tồn tại: không thể bắt đầu cho đến khi xóa nó.</span>' : "") +
+    (!c.envFileOk ? '<br><span class="bad">Không thấy file khóa (--env-file): không thể bắt đầu từ dashboard.</span>' : "");
+  setHTML("ctlStatus", `${st}<div class="sub">${mk}${warn}</div>`);
+  // A status message is only useful for a few seconds; the panel's own status line says the rest.
+  if (CTL.msg && !CTL.busy && Date.now() - (CTL.msgAt || 0) > 12000 && CTL.msgCls !== "bad") { CTL.msg = ""; $("ctlMsg").textContent = ""; }
+  const hasTok = TOKEN.length >= 32;
+  $("btnStart").disabled = CTL.busy || c.running || c.killFile || !c.envFileOk || !hasTok || !!cf.error;
+  $("btnStop").disabled = CTL.busy || !c.running || c.stopRequested || r.state === "finishing" || !hasTok;
+  $("btnStart").title = !hasTok ? "Nhập mã điều khiển trước" : "";
+  if (!hasTok && !CTL.msg) say("Dán mã từ file state/dashboard.token vào ô bên trên để mở khóa các nút.", "muted");
+}
+
+function legend(series) {
+  return series.map((s) => `<span><i style="background:${s.color === "--ink-line" ? "var(--muted)" : `var(${s.color})`}"></i>${esc(s.label)}</span>`).join("");
+}
+
+// ---- charts ----------------------------------------------------------------------------------
+const hover = {};
+const chartArgs = {};
+function drawChart(id, series, o) {
+  chartArgs[id] = [series, o];
+  const cv = $(id), dpr = window.devicePixelRatio || 1, W = cv.clientWidth, H = cv.clientHeight;
+  if (!W) return;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const g = cv.getContext("2d");
+  g.scale(dpr, dpr);
+  const css = (n) => (n === "--ink-line" ? getComputedStyle(document.documentElement).getPropertyValue("--muted").trim() : getComputedStyle(document.documentElement).getPropertyValue(n).trim());
+  const ink = css("--muted"), line = css("--line");
+  g.font = "11px system-ui, sans-serif";
+  const lines = series.map((s) => ({ ...s, pts: s.xs.map((x, i) => [x, s.ys[i]]).filter((p) => isNum(p[1])) })).filter((s) => s.pts.length);
+  if (!lines.length || lines.every((s) => s.pts.length < 2)) { g.fillStyle = ink; g.fillText("chưa đủ dữ liệu trong khoảng này", 10, 20); return; }
+  const all = lines.flatMap((s) => s.pts.map((p) => p[1]));
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (isNum(o.base)) { lo = Math.min(lo, o.base); hi = Math.max(hi, o.base); }
+  if (o.min0) lo = Math.min(lo, 0);
+  if (hi - lo < 1e-9) { hi += 0.5; lo -= 0.5; }
+  const padv = (hi - lo) * 0.08; lo = o.min0 ? 0 : lo - padv; hi += padv;
+  const x0 = 58, x1 = W - 10, y0 = 8, y1 = H - 20;
+  const t0 = Math.min(...lines.map((s) => s.pts[0][0])), t1 = Math.max(...lines.map((s) => s.pts[s.pts.length - 1][0]));
+  const X = (t) => x0 + ((t - t0) / Math.max(1, t1 - t0)) * (x1 - x0);
+  const Y = (v) => y1 - ((v - lo) / (hi - lo)) * (y1 - y0);
+  g.strokeStyle = line; g.fillStyle = ink; g.lineWidth = 1;
+  for (let i = 0; i <= 3; i++) {
+    const v = lo + ((hi - lo) * i) / 3, y = Y(v);
+    g.beginPath(); g.moveTo(x0, y); g.lineTo(x1, y); g.stroke();
+    g.fillText(fmt(v, o.dec), 4, y + 4);
+  }
+  g.fillText(tfmt(t0, o.span), x0, H - 5);
+  const lab = tfmt(t1, o.span); g.fillText(lab, x1 - g.measureText(lab).width, H - 5);
+  if (isNum(o.base)) {
+    g.setLineDash([4, 4]); g.strokeStyle = ink;
+    g.beginPath(); g.moveTo(x0, Y(o.base)); g.lineTo(x1, Y(o.base)); g.stroke(); g.setLineDash([]);
+  }
+  for (const s of lines) {
+    g.strokeStyle = css(s.color); g.lineWidth = 2; g.beginPath();
+    s.pts.forEach((p, i) => {
+      if (i === 0) g.moveTo(X(p[0]), Y(p[1]));
+      else { if (s.step) g.lineTo(X(p[0]), Y(s.pts[i - 1][1])); g.lineTo(X(p[0]), Y(p[1])); }
+    });
+    g.stroke();
+    const lp = s.pts[s.pts.length - 1];
+    g.fillStyle = css(s.color); g.beginPath(); g.arc(X(lp[0]), Y(lp[1]), 3, 0, 7); g.fill();
+  }
+  const hx = hover[id];
+  if (isNum(hx) && hx >= x0 && hx <= x1) {
+    const tt = t0 + ((hx - x0) / (x1 - x0)) * (t1 - t0);
+    g.strokeStyle = ink; g.lineWidth = 1; g.beginPath(); g.moveTo(hx, y0); g.lineTo(hx, y1); g.stroke();
+    const rows = lines.map((s) => {
+      let best = s.pts[0];
+      for (const p of s.pts) if (Math.abs(p[0] - tt) < Math.abs(best[0] - tt)) best = p;
+      return `${s.label}: ${fmt(best[1], o.dec)}`;
+    });
+    const text = [tfmt(tt, 0), ...rows];
+    const w = Math.max(...text.map((t) => g.measureText(t).width)) + 12, h = text.length * 14 + 6;
+    const bx = hx + 10 + w > W ? hx - w - 10 : hx + 10;
+    g.fillStyle = css("--card"); g.strokeStyle = line; g.fillRect(bx, y0 + 4, w, h); g.strokeRect(bx, y0 + 4, w, h);
+    g.fillStyle = css("--ink") || ink;
+    text.forEach((t, i) => g.fillText(t, bx + 6, y0 + 17 + i * 14));
+  }
+}
+for (const id of ["c-equity", "c-pos", "c-vol", "c-apt"]) {
+  const cv = $(id);
+  cv.addEventListener("mousemove", (ev) => { hover[id] = ev.offsetX; if (chartArgs[id]) drawChart(id, ...chartArgs[id]); });
+  cv.addEventListener("mouseleave", () => { hover[id] = null; if (chartArgs[id]) drawChart(id, ...chartArgs[id]); });
+}
+
+// ---- polling (every second) ------------------------------------------------------------------
+let busy = false;
+// ---- connection handling ---------------------------------------------------------------------
+// The page is reached through a tunnel that can drop, hang half-open, or come back after the server restarted with new code.
+// Every request has a deadline (a hung fetch used to leave the page frozen for ever), failures back off and say so, the last
+// data stays on screen (dimmed), and a changed build reloads the page by itself.
+const MY_BUILD = (document.querySelector('meta[name="mm-build"]') || {}).content || "";
+const WANT_API = Number("__API__") || 0;
+const CONN = { fails: 0, okAt: 0, timer: null, why: "" };
+const hhmm = (ms) => new Date(ms).toLocaleTimeString("vi-VN", { hour12: false });
+function showConn(html, cls) {
+  const e = $("conn");
+  e.className = "conn " + (cls || "info") + (html ? "" : " hidden");
+  if (e.innerHTML !== html) e.innerHTML = html;
+  document.body.classList.toggle("dim", cls === "bad" && !!html);
+}
+function reloadOnce() {
+  try {
+    const t = Number(sessionStorage.getItem("mm.reloadAt") || 0);
+    if (Date.now() - t < 15000) return false;
+    sessionStorage.setItem("mm.reloadAt", String(Date.now()));
+  } catch (e) { return false; } // cannot remember that we already reloaded: do not risk a loop
+  location.reload();
+  return true;
+}
+const nextDelay = () => (CONN.fails === 0 ? 1000 : Math.min(15000, 1000 * 2 ** Math.min(CONN.fails, 4)));
+function schedule(ms) { clearTimeout(CONN.timer); CONN.timer = setTimeout(tick, ms); }
+async function tick() {
+  if (document.hidden) return schedule(2000);
+  await refresh();
+  schedule(nextDelay());
+}
+async function refresh() {
+  if (busy) return;
+  busy = true;
+  const ac = new AbortController();
+  const deadline = setTimeout(() => ac.abort(), 8000);
+  let data = null;
+  try {
+    const q = new URLSearchParams();
+    const rs = rangeSec();
+    if (rs) q.set("range", String(rs));
+    if (S.market) q.set("market", S.market);
+    if (RUN) q.set("run", RUN);
+    if (!S.aptAuto) q.set("apt", String(S.apt));
+    const res = await fetch("/api/data?" + q, { cache: "no-store", signal: ac.signal });
+    if (!res.ok) throw new Error("HTTP " + res.status);
+    data = await res.json();
+    if (!Array.isArray(data.markets) || !data.window) throw new Error("dashboard server trả về dữ liệu của một phiên bản cũ");
+  } catch (err) {
+    CONN.fails++;
+    CONN.why = err && err.name === "AbortError" ? "không trả lời trong 8 giây" : String((err && err.message) || err);
+    const wait = Math.round(nextDelay() / 1000);
+    if (CONN.fails >= 2 || !CONN.okAt || (err && err.name === "AbortError")) { // a request that hung for 8 s is already worth saying so
+      showConn(`Mất kết nối tới dashboard server (${esc(CONN.why)}). Đang thử lại sau ${wait} giây, lần ${CONN.fails}.` +
+        (CONN.okAt ? ` Số liệu bên dưới là của lúc ${hhmm(CONN.okAt)}, không còn cập nhật.` : "") +
+        ` <span class="sub">Nếu kéo dài: đường hầm SSH đã rớt hoặc dịch vụ dashboard đang khởi động lại; trang sẽ tự nối lại.</span>`, "bad");
+    }
+    return;
+  } finally {
+    clearTimeout(deadline);
+    busy = false;
+  }
+  CONN.fails = 0;
+  CONN.okAt = Date.now();
+  if (WANT_API && data.api !== undefined && data.api !== WANT_API) {
+    showConn(`Trang (API v${WANT_API}) và tiến trình dashboard trên máy ảo (API v${data.api}) khác phiên bản. Khởi động lại dịch vụ: <span class="mono">sudo systemctl restart decibel-dashboard</span>, rồi tải lại trang.`, "warn");
+  } else if (MY_BUILD && data.build && data.build !== MY_BUILD) {
+    if (!reloadOnce()) showConn("Có bản trang mới. Nhấn F5 để tải lại.", "warn");
+    else return;
+  } else showConn("", "info");
+  try {
+    render(data);
+  } catch (err) {
+    console.error(err);
+    showConn(`Lỗi khi hiển thị dữ liệu: ${esc(String((err && err.message) || err))}`, "warn");
+  }
+}
+syncControls();
+schedule(0);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) schedule(0); });
+window.addEventListener("online", () => { CONN.fails = 0; schedule(0); });
+window.addEventListener("resize", () => { if (lastData) { try { render(lastData); } catch (e) { /* the next poll shows it */ } } });
+</script>
+</body>
+</html>

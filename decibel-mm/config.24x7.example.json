@@ -1,0 +1,68 @@
+{
+  "network": "mainnet",
+  "markets": [
+    {
+      "name": "ETH/USD",
+      "maxPositionUsd": 100,
+      "levelSizeUsd": 40,
+      "levels": 3,
+      "baseHalfSpreadBps": 2.5,
+      "levelStepBps": 1.5,
+      "inventorySkewBps": 8,
+      "minHalfSpreadBps": 1
+    }
+  ],
+  "sizing": {
+    "leverage": 1.5,
+    "levelFraction": 0.33,
+    "rebalanceTol": 0.1
+  },
+  "points": {
+    "costBudgetBps": 3,
+    "dailyVolumeTargetUsd": 3000,
+    "streakMinVolumeUsd": 500,
+    "ewmaHalfLifeUsd": 1500,
+    "minSampleUsd": 300
+  },
+  "risk": {
+    "maxDrawdownUsd": 4,
+    "minEquityUsd": 14,
+    "maxDailyLossUsd": 1.2,
+    "maxPaceMult": 3,
+    "minGasBalanceApt": 0.1,
+    "maxGasAptPerDay": 0.8,
+    "maxDataStaleMs": 30000
+  },
+  "engine": {
+    "minReplaceIntervalMs": 120000,
+    "urgentRepriceBps": 6,
+    "watchdogMs": 180000,
+    "logMaxBytes": 50000000
+  },
+  "ramp": {
+    "enabled": false
+  },
+  "fuse": {
+    "haltMode": "cooloff",
+    "cooloffMs": 3600000
+  },
+  "competition": {
+    "joinTouch": true,
+    "touchGuardTicks": 0,
+    "crossesPerTick": 3,
+    "maxGuardTicks": 2
+  },
+  "gas": {
+    "priceFeed": true,
+    "aptUsdFallback": 0.8
+  },
+  "execution": {
+    "encrypted": "auto"
+  },
+  "rebate": {
+    "enabled": true,
+    "bps": 0.5,
+    "minMakerRatio": 0.8,
+    "ratioBuffer": 0.05
+  }
+}

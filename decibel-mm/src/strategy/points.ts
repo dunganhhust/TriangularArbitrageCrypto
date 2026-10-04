@@ -31,12 +31,29 @@ interface Pending {
   refMid: number;
 }
 
+export interface DaySummary {
+  day: string;
+  volumeUsd: number;
+  makerVolumeUsd: number;
+  takerVolumeUsd: number;
+  feesUsd: number;
+  gasUsd: number;
+}
+
 export interface PointsStats {
+  /** Half-month rebate cycle, e.g. "2026-10-A" (1st-15th) or "2026-10-B" (16th-end), UTC. */
+  cycleKey: string;
+  cycleMakerVolumeUsd: number;
+  cycleTakerVolumeUsd: number;
+  /** Maker share of this cycle's volume, or null before any volume. */
+  cycleMakerRatio: number | null;
   dayKey: string;
   dayVolumeUsd: number;
   dayMakerVolumeUsd: number;
   dayTakerVolumeUsd: number;
   dayFeesUsd: number;
+  /** Gas paid today, in USD (0 while the APT price is unknown). */
+  dayGasUsd: number;
   /** EWMA realized PnL per notional in bps (spread capture + markout - fees). Positive = earning. */
   ewmaPnlBps: number;
   ewmaSampleUsd: number;
@@ -47,7 +64,14 @@ export interface PointsStats {
 }
 
 const DAY_MS = 86_400_000;
+const BUCKET_MS = 300_000;
+const HOUR_BUCKETS = 12;
+const MAX_GAS_BPS = 6;
 const utcDayKey = (ts: number): string => new Date(ts).toISOString().slice(0, 10);
+export const cycleKeyOf = (ts: number): string => {
+  const d = new Date(ts);
+  return `${d.toISOString().slice(0, 7)}-${d.getUTCDate() <= 15 ? "A" : "B"}`;
+};
 
 /**
  * Adapts the quote aggressiveness to buy as much maker volume as the cost budget allows.
@@ -58,17 +82,27 @@ const utcDayKey = (ts: number): string => new Date(ts).toISOString().slice(0, 10
  * schedule) and widens when cost exceeds it.
  */
 export class PointsController {
+  /** Called with the finished day's totals just before they are reset. */
+  onDayEnd: ((d: DaySummary) => void) | null = null;
   private pending: Pending[] = [];
   private mult: number;
   private lastControl = 0;
   private day = "";
+  private cycle = "";
+  private cycleMaker = 0;
+  private cycleTaker = 0;
   private dayVol = 0;
   private dayMaker = 0;
   private dayTaker = 0;
   private dayFees = 0;
+  private dayGas = 0;
   private ewmaNum = 0; // sum of pnlUsd, decayed
   private ewmaDen = 0; // sum of notional, decayed
+  /** Gas and volume in 5-minute buckets: gas is charged to the volume of the last hour, so a quiet spell cannot pile it up. */
+  private readonly buckets = new Map<number, { gas: number; vol: number }>();
   private now = 0;
+  /** Gross markouts (bps, positive = good for us) of the most recent fills. */
+  private recentMarkouts: number[] = [];
 
   constructor(
     private readonly cfg: PointsConfig,
@@ -84,14 +118,69 @@ export class PointsController {
     if (s.spreadMult) this.mult = clamp(s.spreadMult, this.cfg.minSpreadMult, this.cfg.maxSpreadMult);
   }
 
+  /** Restore this half-month cycle's volumes after a restart (ignored if the cycle has changed). */
+  restoreCycle(s: { cycleKey: string; makerUsd: number; takerUsd: number }, now: number): void {
+    if (s.cycleKey !== cycleKeyOf(now)) return;
+    this.cycle = s.cycleKey;
+    this.cycleMaker = s.makerUsd;
+    this.cycleTaker = s.takerUsd;
+  }
+
   onFill(fill: Fill, refMid: number): void {
     this.rollDay(fill.ts);
     const n = fill.price * fill.size;
     this.dayVol += n;
-    if (fill.isMaker) this.dayMaker += n;
-    else this.dayTaker += n;
+    this.bucket(fill.ts).vol += n;
+    if (fill.isMaker) {
+      this.dayMaker += n;
+      this.cycleMaker += n;
+    } else {
+      this.dayTaker += n;
+      this.cycleTaker += n;
+    }
     this.dayFees += fill.feeUsd;
     this.pending.push({ fill, refMid });
+  }
+
+  /**
+   * Gas is part of what the volume costs: it goes into the same average the spread controller reads, so quotes
+   * widen when fees + adverse selection + gas together exceed the budget, not just the first two.
+   */
+  onGasCost(usd: number, ts: number): void {
+    if (!(usd > 0)) return;
+    this.rollDay(ts);
+    this.dayGas += usd;
+    this.bucket(ts).gas += usd;
+  }
+
+  private bucket(ts: number): { gas: number; vol: number } {
+    const k = Math.floor(ts / BUCKET_MS);
+    let b = this.buckets.get(k);
+    if (!b) {
+      b = { gas: 0, vol: 0 };
+      this.buckets.set(k, b);
+      for (const old of this.buckets.keys()) if (old < k - 2 * (HOUR_BUCKETS)) this.buckets.delete(old);
+    }
+    return b;
+  }
+
+  /**
+   * Gas per traded dollar over the last hour, in bps. Zero until there is some volume to charge it to (at least
+   * `minSampleUsd / 10`), and capped, so that a quiet spell cannot drive the controller to its widest quotes for good.
+   */
+  gasBps(now: number): number {
+    const k = Math.floor(now / BUCKET_MS);
+    let gas = 0;
+    let vol = 0;
+    for (let i = 0; i < HOUR_BUCKETS; i++) {
+      const b = this.buckets.get(k - i);
+      if (b) {
+        gas += b.gas;
+        vol += b.vol;
+      }
+    }
+    if (vol < Math.max(1, this.cfg.minSampleUsd / 10)) return 0;
+    return Math.min(MAX_GAS_BPS, (gas / vol) * 1e4);
   }
 
   /** Resolve fills whose markout horizon elapsed; call with the current mid for each market. */
@@ -122,13 +211,38 @@ export class PointsController {
     const lambda = Math.pow(0.5, n / this.cfg.ewmaHalfLifeUsd);
     this.ewmaNum = this.ewmaNum * lambda + pnlUsd;
     this.ewmaDen = this.ewmaDen * lambda + n;
+    this.recentMarkouts.push((dir * (laterMid - fill.price)) / fill.price * 1e4);
+    if (this.recentMarkouts.length > 20) this.recentMarkouts.shift();
+  }
+
+  /** Average gross markout of the last `n` resolved fills, or null with fewer than `n`. */
+  toxicity(n: number): number | null {
+    if (this.recentMarkouts.length < n) return null;
+    const w = this.recentMarkouts.slice(-n);
+    return w.reduce((a, b) => a + b, 0) / n;
+  }
+
+  /** Forget recent markouts (after the fuse has acted on them). */
+  resetToxicity(): void {
+    this.recentMarkouts = [];
   }
 
   private rollDay(ts: number): void {
+    const ck = cycleKeyOf(ts);
+    if (ck !== this.cycle) {
+      this.cycle = ck;
+      this.cycleMaker = this.cycleTaker = 0;
+    }
     const key = utcDayKey(ts);
     if (key !== this.day) {
+      // Capture the finished day, switch to the new one, and only then tell the listener: it may call back into stats().
+      const ended: DaySummary | null =
+        this.day !== "" && this.dayVol > 0
+          ? { day: this.day, volumeUsd: this.dayVol, makerVolumeUsd: this.dayMaker, takerVolumeUsd: this.dayTaker, feesUsd: this.dayFees, gasUsd: this.dayGas }
+          : null;
       this.day = key;
-      this.dayVol = this.dayMaker = this.dayTaker = this.dayFees = 0;
+      this.dayVol = this.dayMaker = this.dayTaker = this.dayFees = this.dayGas = 0;
+      if (ended) this.onDayEnd?.(ended);
     }
   }
 
@@ -144,7 +258,7 @@ export class PointsController {
     const volFrac = cfg.dailyVolumeTargetUsd > 0 ? this.dayVol / cfg.dailyVolumeTargetUsd : 1;
     const behind = volFrac < frac - 0.1;
     const secured = this.dayVol >= cfg.streakMinVolumeUsd;
-    const pnlBps = this.ewmaDen > 0 ? (this.ewmaNum / this.ewmaDen) * 1e4 : 0;
+    const pnlBps = (this.ewmaDen > 0 ? (this.ewmaNum / this.ewmaDen) * 1e4 : 0) - this.gasBps(now);
     const enough = this.ewmaDen >= cfg.minSampleUsd;
     const floorPnl = -cfg.costBudgetBps;
 
@@ -172,13 +286,19 @@ export class PointsController {
 
   stats(now: number): PointsStats {
     this.rollDay(now);
+    const cv = this.cycleMaker + this.cycleTaker;
     return {
+      cycleKey: this.cycle,
+      cycleMakerVolumeUsd: this.cycleMaker,
+      cycleTakerVolumeUsd: this.cycleTaker,
+      cycleMakerRatio: cv > 0 ? this.cycleMaker / cv : null,
       dayKey: this.day,
       dayVolumeUsd: this.dayVol,
       dayMakerVolumeUsd: this.dayMaker,
       dayTakerVolumeUsd: this.dayTaker,
       dayFeesUsd: this.dayFees,
-      ewmaPnlBps: this.ewmaDen > 0 ? (this.ewmaNum / this.ewmaDen) * 1e4 : 0,
+      dayGasUsd: this.dayGas,
+      ewmaPnlBps: (this.ewmaDen > 0 ? (this.ewmaNum / this.ewmaDen) * 1e4 : 0) - this.gasBps(now),
       ewmaSampleUsd: this.ewmaDen,
       spreadMult: this.mult,
       scheduleFrac: this.scheduleFrac(now),

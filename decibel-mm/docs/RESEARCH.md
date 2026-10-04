@@ -17,17 +17,42 @@ before real money is used.
   REST `https://api.mainnet.aptoslabs.com/decibel`, WS `wss://api.mainnet.aptoslabs.com/decibel/ws`,
   gas station `https://api.mainnet.aptoslabs.com/gs/v1`.
 
-## Fees (docs.decibel.trade/for-traders/fees, via search snippet)
+## Fees (Decibel app, Fee Schedule dialog, perps, read 2026-10-02)
 
 | Tier | 30d volume | Taker | Maker |
 |---|---|---|---|
-| 0 | < $10M | 3.40 bps | 1.10 bps |
-| 1 | > $10M | 3.00 | 0.90 |
-| 2 | > $50M | 2.50 | 0.60 |
-| 3 | > $200M | 2.20 | 0.30 |
-| 4 | > $1B | 2.10 | 0.00 |
-| 5 | > $4B | 1.90 | 0.00 |
-| 6 | > $15B | 1.80 | 0.00 |
+| 0 | < $1M | 4.50 bps | 1.50 bps |
+| 1 | >= $1M | 4.00 | 1.20 |
+| 2 | >= $5M | 3.50 | 0.80 |
+| 3 | >= $25M | 3.00 | 0.40 |
+| 4 | >= $100M | 2.80 | 0.00 |
+| 5 | >= $250M | 2.60 | 0.00 |
+| 6 | >= $1B | 2.40 | 0.00 |
+
+The dialog says "Maker fees drop to zero at higher tiers". **No volume tier pays a negative maker fee**: the
+best a maker gets from this ladder is 0 bps, at >= $100M of 30-day volume. (An earlier search snippet quoted lower
+numbers, 1.1/3.4 bps at tier 0; it was out of date. Trust the live `userFees` values the bot logs.)
+
+**Observed on mainnet (2026-10-02, fee tier 0, via `userFees`):** maker 0.015% (1.5 bps), taker 0.045%
+(4.5 bps) — higher than the table above, so always trust the live `userFees` values the bot logs.
+`npm run check` also confirmed mainnet market names use a slash (`BTC/USD`), and `perp_equity_balance`
+is reported in plain USD.
+
+**Maker Rebate campaign (docs "Maker Rebate", read 2026-10-02):** 0.5 bps on bulk-order maker fill volume for
+accounts with an 80 %+ maker ratio over the cycle, measured per leg (perp / spot) on bulk-order fill volume;
+`maker_notional = perp_maker + 2 * spot_maker`; cycles 1st-15th and 16th-end; cap 25,000 USD per month shared by
+both cycles; "a direct rebate paid on top of standard fees". Paid after the cycle ends as a claimable campaign
+(the app lists past periods as "Not eligible" for an account that did not trade in them). The page's remaining
+eligibility bullets were not captured.
+
+**Where a maker rebate can come from (from the SDK types, unverified until `npm run check` prints the live numbers):**
+
+- `fee_schedule.tiers.market_maker[]`: tiers judged on `maker_fraction_threshold`, the share of your fee-window
+  volume that is maker, each with a `maker` rate. Staying ~100 % maker is therefore worth money in itself, and every
+  taker fill (including emergency IOC reduces and orders that cross the book) works against it.
+- `fee_schedule.tiers.vip[]`: tiers by volume, each with maker and taker rates.
+- `referral_discount` / `active_referral_discount`.
+- Campaigns of type `maker_incentive` and `fee_rebate` (`campaigns.getActive`, claimed with `claimCampaignReward`).
 
 Consequence: at tier 0 a maker **pays** 1.1 bps. There is no negative maker fee in this
 schedule, so "rebate" income, if any, comes from campaigns (below), not the fee tier.
@@ -48,6 +73,11 @@ Known from public pages and SDK types:
   `pointsLeaderboard`, `globalPointsStats`.
 - `campaigns` types include `maker_incentive` and `fee_rebate` — these are the likely sources of
   any maker rebate. Reward amounts are claimed with `claimCampaignReward(id)`.
+
+**Observed on mainnet (2026-10-02):** `tradingAmps` (per-day Amps) returned `HTTP 403 (Forbidden): internal only`
+for a normal API key, so daily Amps cannot be read via the public API. `streaks`, `tier` and `userFees` responded.
+The bot therefore also reads `tradingPoints` (lifetime total) and logs it as `totalPoints`; compute Amps per dollar
+from the *change* in `totalPoints` against traded volume between rows of `data/points_log.csv`.
 
 **UNVERIFIED / not public:** the exact Amps-per-dollar formula, whether maker and taker volume
 are weighted differently, the streak volume threshold, and any wash-trading filters.
@@ -82,10 +112,26 @@ It does not guess a formula. It:
   not documented in the types. The adapter detects it from the oracle price and refuses to trade
   when ambiguous (override with `live.priceUnits` / `live.sizeUnits`).
 
+## Gas price and encrypted submission
+
+`@aptos-labs/ts-sdk` sets `MIN_ENCRYPTED_TXN_GAS_UNIT_PRICE = 200` octas; the plain path uses the node's estimate, normally
+the network minimum of 100. So an encrypted transaction pays **about twice the gas** of a plain one for the same work. The
+adapter records gas per path (`GasMeter`), and every `status` line carries `gasPerTxApt: {encrypted, plain, encryptedTx, plainTx}`
+once both paths have been used. Whether encryption protects against anything that matters for a bot of this size is NOT
+measured: compare two stretches with `execution.encrypted` `"auto"` and `"off"` (gas per volume, and the 5 s markout in
+`pnlBps`) before changing it.
+
+Measured on mainnet (ETH/USD, tier 0, 1 h, 2.5 USD levels): 81 transactions, 0.0437 APT, 204 USD volume = 1.78 bps of gas
+per dollar traded; the fee side was 1.78 bps and adverse selection about 1.2 bps. Gas per dollar falls in proportion to the
+size of each fill, which is why `sizing.leverage` is the first lever.
+
 ## Things to verify on testnet before mainnet
 
 1. `npm run check` — units detected correctly, markets listed, fee rates and Amps endpoints return data for your owner address.
-2. A bulk order with a crossing price: does it reject, or take? (The bot never sends one, but confirm the failure mode.)
+2. A bulk order with a crossing price: does it reject, or take? (The bot never sends one on purpose, but the market can reach a
+   resting quote before the transaction lands. Taker fills are now logged with `kind: "reduce"` (our own close-out order) or
+   `"cross"` (a resting order that executed as taker) and counted as `takerCross` / `takerReduce` in the status line: a non-zero
+   `takerCross` on mainnet answers this, and the touch guard (`competition.crossesPerTick`) reacts to it by itself.)
 3. Position `size` sign convention (assumed signed, long > 0).
 4. Whether bulk-order fills appear in `userTradeHistory` with `source = OrderFill` (assumed yes).
 5. How partial fills change the resting bulk order (the bot re-sends the full ladder after any fill, so it self-heals either way).
