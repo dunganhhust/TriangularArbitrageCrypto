@@ -1,0 +1,15 @@
+{
+  "symbols": ["ETH", "BTC"],
+  "notionalUsd": [50, 200],
+  "extraBps": 0.5,
+  "minNetBps": 0,
+  "holdDays": 3,
+  "venues": {
+    "hyperliquid": { "enabled": true, "fees": { "makerBps": 1.5, "takerBps": 4.5 } },
+    "lighter": { "enabled": true, "fees": { "makerBps": 0, "takerBps": 0 } },
+    "decibel": { "enabled": true, "fees": { "makerBps": 1.5, "takerBps": 4.5 } },
+    "aster": { "enabled": true, "fees": { "makerBps": 1, "takerBps": 3.5 } },
+    "variational": { "enabled": true },
+    "tradexyz": { "enabled": false, "symbolMap": { "TSLA": "xyz:TSLA" } }
+  }
+}
