@@ -1,0 +1,94 @@
+{
+  "name": "@aptos-labs/aptos-client",
+  "type": "module",
+  "description": "Client package for accessing the Aptos network API.",
+  "packageManager": "pnpm@10.30.1",
+  "license": "Apache-2.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "exports": {
+    ".": {
+      "deno": {
+        "types": "./dist/index.fetch.d.ts",
+        "default": "./dist/index.fetch.js"
+      },
+      "bun": {
+        "types": "./dist/index.fetch.d.ts",
+        "default": "./dist/index.fetch.js"
+      },
+      "workerd": {
+        "types": "./dist/index.fetch.d.ts",
+        "default": "./dist/index.fetch.js"
+      },
+      "edge-light": {
+        "types": "./dist/index.fetch.d.ts",
+        "default": "./dist/index.fetch.js"
+      },
+      "browser": {
+        "types": "./dist/index.browser.d.ts",
+        "default": "./dist/index.browser.js"
+      },
+      "react-native": {
+        "types": "./dist/index.fetch.d.ts",
+        "default": "./dist/index.fetch.js"
+      },
+      "node": {
+        "types": "./dist/index.node.d.ts",
+        "default": "./dist/index.node.js"
+      },
+      "default": {
+        "types": "./dist/index.fetch.d.ts",
+        "default": "./dist/index.fetch.js"
+      }
+    }
+  },
+  "sideEffects": false,
+  "types": "./dist/index.node.d.ts",
+  "files": [
+    "dist",
+    "src"
+  ],
+  "scripts": {
+    "build:clean": "rm -rf dist",
+    "build": "pnpm build:clean && tsc --project tsconfig.build.json",
+    "test": "tsx --test --test-force-exit test/node.test.ts test/fetch.test.ts test/browser.test.ts test/cookieJar.test.ts",
+    "coverage": "rm -rf coverage && mkdir -p coverage && tsx --test --experimental-test-coverage --test-coverage-include='src/**/*.ts' --test-coverage-exclude='test/**' --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info --test-force-exit test/node.test.ts test/fetch.test.ts test/browser.test.ts test/cookieJar.test.ts",
+    "test:node": "tsx --test --test-force-exit test/node.test.ts",
+    "test:fetch": "tsx --test --test-force-exit test/fetch.test.ts",
+    "test:browser": "tsx --test --test-force-exit test/browser.test.ts",
+    "test:deno": "deno test --allow-net=127.0.0.1 --allow-run=npx --allow-read=. --allow-env --unsafely-ignore-certificate-errors=127.0.0.1 test/deno.integration.ts",
+    "test:bun": "bun test ./test/bun.integration.ts",
+    "test:build": "pnpm build && tsx --test --test-force-exit test/build.test.ts",
+    "lint": "biome check",
+    "lint:fix": "biome check --write",
+    "fmt": "biome format --write",
+    "typecheck": "tsc --noEmit && tsc --project tsconfig.test.json --noEmit",
+    "check": "biome check"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/aptos-labs/aptos-client.git"
+  },
+  "homepage": "https://github.com/aptos-labs/aptos-client",
+  "bugs": {
+    "url": "https://github.com/aptos-labs/aptos-client/issues"
+  },
+  "author": "aptoslabs.com",
+  "keywords": [
+    "Aptos",
+    "Aptos Labs",
+    "Aptos SDK"
+  ],
+  "dependencies": {
+    "got": "^15.0.5"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.4.15",
+    "@types/node": "22.19.19",
+    "esbuild": "0.28.0",
+    "tsx": "4.22.2",
+    "typescript": "6.0.3"
+  },
+  "version": "4.1.0"
+}

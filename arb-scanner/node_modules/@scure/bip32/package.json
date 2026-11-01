@@ -1,0 +1,55 @@
+{
+  "name": "@scure/bip32",
+  "version": "2.4.0",
+  "description": "Secure, audited & minimal implementation of BIP32 hierarchical deterministic (HD) wallets over secp256k1",
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "index.ts"
+  ],
+  "dependencies": {
+    "@noble/curves": "2.4.0",
+    "@noble/hashes": "2.4.0",
+    "@scure/base": "2.4.0"
+  },
+  "devDependencies": {
+    "@paulmillr/jsbt": "0.7.1",
+    "bismar": "0.1.8",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3"
+  },
+  "scripts": {
+    "benchmark:size": "bismar -bsm",
+    "build": "tsc",
+    "check": "jsbt-check",
+    "format": "prettier --write 'index.ts' 'test/*.test.ts'",
+    "test": "node test/index.ts"
+  },
+  "keywords": [
+    "bip32",
+    "hierarchical",
+    "deterministic",
+    "hd key",
+    "bip0032",
+    "bip-32",
+    "bip39",
+    "micro",
+    "scure",
+    "mnemonic",
+    "phrase",
+    "code"
+  ],
+  "homepage": "https://paulmillr.com/noble/#scure",
+  "funding": "https://paulmillr.com/funding/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/paulmillr/scure-bip32.git"
+  },
+  "type": "module",
+  "main": "index.js",
+  "module": "index.js",
+  "types": "index.d.ts",
+  "sideEffects": false,
+  "author": "Paul Miller (https://paulmillr.com)",
+  "license": "MIT"
+}
