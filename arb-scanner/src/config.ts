@@ -35,6 +35,10 @@ export const ConfigSchema = z.object({
       hyperliquid: venue.default({}),
       lighter: venue.default({}),
       decibel: venue.default({}),
+      aster: venue.default({}),
+      variational: venue.default({}),
+      /** trade.xyz: HIP-3 markets on Hyperliquid (use symbolMap, e.g. {"TSLA": "xyz:TSLA"}). Off until verified. */
+      tradexyz: venue.default({ enabled: false }),
     })
     .default({}),
 });

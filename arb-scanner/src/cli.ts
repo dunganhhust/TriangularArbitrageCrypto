@@ -4,9 +4,11 @@ import { loadConfig } from "./config.js";
 import type { Config } from "./config.js";
 import { crossOpp, fundingEdge, OppTracker } from "./scanner.js";
 import type { Log, Venue } from "./types.js";
+import { Aster } from "./venues/aster.js";
 import { Decibel } from "./venues/decibel.js";
 import { Hyperliquid } from "./venues/hyperliquid.js";
 import { Lighter } from "./venues/lighter.js";
+import { Variational } from "./venues/variational.js";
 
 const log: Log = (msg, extra) => console.error(JSON.stringify({ t: new Date().toISOString(), msg, ...extra }));
 
@@ -21,6 +23,9 @@ function buildVenues(cfg: Config, only?: string): Venue[] {
   const want = (n: string, enabled: boolean): boolean => (only ? only === n : enabled);
   if (want("hyperliquid", v.hyperliquid.enabled)) out.push(new Hyperliquid(log, v.hyperliquid.fees, v.hyperliquid.url, v.hyperliquid.symbolMap));
   if (want("lighter", v.lighter.enabled)) out.push(new Lighter(log, v.lighter.fees, v.lighter.url, v.lighter.symbolMap));
+  if (want("aster", v.aster.enabled)) out.push(new Aster(log, v.aster.fees, v.aster.url, undefined, v.aster.symbolMap));
+  if (want("variational", v.variational.enabled)) out.push(new Variational(log, v.variational.fees, v.variational.url));
+  if (want("tradexyz", v.tradexyz.enabled)) out.push(new Hyperliquid(log, v.tradexyz.fees, v.tradexyz.url, v.tradexyz.symbolMap, "xyz", "tradexyz"));
   if (want("decibel", v.decibel.enabled)) {
     const key = process.env.APTOS_NODE_API_KEY;
     if (key) out.push(new Decibel(log, key, v.decibel.fees));

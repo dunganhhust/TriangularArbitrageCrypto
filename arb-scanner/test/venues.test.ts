@@ -60,3 +60,38 @@ describe("config", () => {
     expect(c.venues.hyperliquid.enabled).toBe(true);
   });
 });
+
+import { parseAsterDepth, parseAsterFunding, parseAsterIntervals } from "../src/venues/aster.js";
+import { parseVariationalFunding } from "../src/venues/variational.js";
+
+describe("aster parsers", () => {
+  it("parses a wrapped partial-depth message", () => {
+    const raw = JSON.stringify({ stream: "ethusdt@depth20@100ms", data: { e: "depthUpdate", s: "ETHUSDT", b: [["2699.5", "2"], ["2699.9", "1"]], a: [["2700.1", "3"]] } });
+    const p = parseAsterDepth(raw, 7)!;
+    expect(p.symbol).toBe("ETHUSDT");
+    expect(p.book.bids[0]).toEqual({ price: 2699.9, size: 1 });
+    expect(p.book.ts).toBe(7);
+    expect(parseAsterDepth('{"result":null}', 0)).toBeNull();
+  });
+  it("converts funding to per hour using each symbol's interval", () => {
+    const iv = parseAsterIntervals([{ symbol: "ZORAUSDT", fundingIntervalHours: 4 }]);
+    const f = parseAsterFunding([{ symbol: "ETHUSDT", lastFundingRate: "0.0008" }, { symbol: "ZORAUSDT", lastFundingRate: "0.0008" }], iv, 1);
+    expect(f.get("ETHUSDT")!.ratePerHour).toBeCloseTo(0.0001, 10);
+    expect(f.get("ZORAUSDT")!.ratePerHour).toBeCloseTo(0.0002, 10);
+  });
+});
+
+describe("variational parser", () => {
+  it("reads perpetual funding per hour and skips swaps and null funding", () => {
+    const f = parseVariationalFunding(
+      { listings: [
+        { ticker: "BTC-PERP", contract_type: "perpetual", funding: { last: { interval_rate: "0.00008246" }, interval_seconds: 28800 } },
+        { ticker: "XAU-SWAP", contract_type: "swap", funding: { last: { interval_rate: "0.1" }, interval_seconds: 86400 } },
+        { ticker: "NEW-PERP", contract_type: "perpetual", funding: null },
+      ] },
+      1,
+    );
+    expect(f.get("BTC-PERP")!.ratePerHour).toBeCloseTo(0.00008246 / 8, 12);
+    expect(f.size).toBe(1);
+  });
+});

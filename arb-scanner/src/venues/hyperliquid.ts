@@ -29,7 +29,7 @@ export function parseHlFunding(body: unknown, ts: number): Map<string, Funding> 
 }
 
 export class Hyperliquid implements Venue {
-  readonly name = "hyperliquid";
+  readonly name: string;
   readonly fees: VenueFees;
   samples: string[] = [];
   private books = new Map<string, Book>();
@@ -43,8 +43,12 @@ export class Hyperliquid implements Venue {
     fees: VenueFees = { makerBps: 1.5, takerBps: 4.5 },
     private readonly url = "https://api.hyperliquid.xyz",
     private readonly symbolMap: Record<string, string> = {},
+    /** HIP-3 builder deployment (e.g. "xyz" for trade.xyz); empty for Hyperliquid's own perps. */
+    private readonly dex = "",
+    name = "hyperliquid",
   ) {
     this.fees = fees;
+    this.name = name;
   }
 
   async start(symbols: string[]): Promise<void> {
@@ -72,7 +76,7 @@ export class Hyperliquid implements Venue {
   }
 
   private async pollFunding(): Promise<void> {
-    const r = await fetch(this.url + "/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ type: "metaAndAssetCtxs" }) });
+    const r = await fetch(this.url + "/info", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(this.dex ? { type: "metaAndAssetCtxs", dex: this.dex } : { type: "metaAndAssetCtxs" }) });
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     for (const [k, v] of parseHlFunding(await r.json(), Date.now())) this.fund.set(k, v);
   }
